@@ -629,7 +629,8 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def random_tone_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Случайный кратковременный сдвиг тона и иногда настроения (без участия LLM)."""
-    persona: BotPersonaConfig = context.application.bot_data["persona"]
+    app: Application = context.application
+    persona: BotPersonaConfig = app.bot_data["persona"]
     db: Database = app.bot_data["db"]
     app_cfg: AppConfig = app.bot_data["app_cfg"]
 
