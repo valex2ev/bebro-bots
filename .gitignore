@@ -6,3 +6,8 @@ data/
 *.sqlite
 *.sqlite3
 *.bak
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
