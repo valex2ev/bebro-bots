@@ -41,6 +41,7 @@ class ChatMessageRow:
     content: str | None
     content_type: str
     sticker_file_id: str | None
+    photo_file_id: str | None
     created_at: float
 
 
@@ -82,6 +83,7 @@ class Database:
                   content TEXT,
                   content_type TEXT DEFAULT 'text',
                   sticker_file_id TEXT,
+                  photo_file_id TEXT,
                   created_at REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_cm_bot_chat
@@ -148,6 +150,9 @@ class Database:
             conn.execute("ALTER TABLE bot_state ADD COLUMN persona_text TEXT")
         if "tone_drift_json" not in cols:
             conn.execute("ALTER TABLE bot_state ADD COLUMN tone_drift_json TEXT")
+        cm = {r[1] for r in conn.execute("PRAGMA table_info(chat_messages)").fetchall()}
+        if "photo_file_id" not in cm:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN photo_file_id TEXT")
 
     def get_settings(self, bot_id: str, chat_id: int) -> dict[str, Any]:
         with self.connect() as conn:
@@ -187,6 +192,7 @@ class Database:
         content: str | None,
         content_type: str = "text",
         sticker_file_id: str | None = None,
+        photo_file_id: str | None = None,
     ) -> None:
         now = time.time()
         settings = self.get_settings(bot_id, chat_id)
@@ -195,8 +201,8 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO chat_messages
-                (bot_id, chat_id, message_id, user_id, username, role, content, content_type, sticker_file_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (bot_id, chat_id, message_id, user_id, username, role, content, content_type, sticker_file_id, photo_file_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     bot_id,
@@ -208,6 +214,7 @@ class Database:
                     content,
                     content_type,
                     sticker_file_id,
+                    photo_file_id,
                     now,
                 ),
             )
@@ -232,7 +239,7 @@ class Database:
         with self.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT message_id, user_id, username, role, content, content_type, sticker_file_id, created_at
+                SELECT message_id, user_id, username, role, content, content_type, sticker_file_id, photo_file_id, created_at
                 FROM chat_messages
                 WHERE bot_id=? AND chat_id=?
                 ORDER BY id DESC
@@ -251,6 +258,7 @@ class Database:
                     content=r["content"],
                     content_type=str(r["content_type"] or "text"),
                     sticker_file_id=r["sticker_file_id"],
+                    photo_file_id=r["photo_file_id"],
                     created_at=float(r["created_at"]),
                 )
             )

@@ -22,6 +22,10 @@ def _text_has_mention(text: str | None, bot_username: str) -> bool:
     return needle.lower() in text.lower()
 
 
+def _message_text_for_mention(message: Message) -> str | None:
+    return message.text or message.caption
+
+
 def decide_engagement(
     message: Message,
     *,
@@ -30,7 +34,8 @@ def decide_engagement(
     settings: dict,
 ) -> Engagement:
     """@username — обязательный ответ; ответ на сообщение бота — по вероятности; иначе — базовая."""
-    if message.text and _text_has_mention(message.text, bot_username):
+    combined = _message_text_for_mention(message)
+    if combined and _text_has_mention(combined, bot_username):
         return Engagement(call_llm=True, force_reply=True)
 
     reply_to_bot = bool(

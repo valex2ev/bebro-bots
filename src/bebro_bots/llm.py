@@ -9,6 +9,7 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from bebro_bots.db import Database
+from bebro_bots.telegram_vision import data_url_for_openai
 from bebro_bots.tone_profile import TONE_KEYS, long_memory_limit, situation_rules_limit
 
 logger = logging.getLogger(__name__)
@@ -332,6 +333,21 @@ def _apply_verbosity(patch: dict[str, Any], verbosity: str) -> None:
         patch["short_reply_bias"] = max(-1.0, float(patch.get("short_reply_bias", 0.0)) - 0.3)
 
 
+def _user_message_content(
+    user_lines: list[str],
+    vision_image: tuple[bytes, str] | None,
+) -> str | list[dict[str, Any]]:
+    text = "\n".join(user_lines)
+    if not vision_image:
+        return text
+    data, mime = vision_image
+    url = data_url_for_openai(data, mime)
+    return [
+        {"type": "text", "text": text},
+        {"type": "image_url", "image_url": {"url": url}},
+    ]
+
+
 async def run_agent_turn(
     *,
     client: AsyncOpenAI,
@@ -345,10 +361,11 @@ async def run_agent_turn(
     allow_web_search: bool = False,
     allow_mutations: bool = True,
     feedback_sensitivity: int = 4,
+    vision_image: tuple[bytes, str] | None = None,
 ) -> CompleteTurnResult:
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": "\n".join(user_lines)},
+        {"role": "user", "content": _user_message_content(user_lines, vision_image)},
     ]
     if force_substantive_reply:
         messages.append(
@@ -593,6 +610,10 @@ def format_recent_for_prompt(rows: list, limit: int) -> list[str]:
         who = r.username or (str(r.user_id) if r.user_id else "?")
         if r.content_type == "sticker" and r.sticker_file_id:
             lines.append(f"[{who}] [sticker file_id={r.sticker_file_id}]")
+        elif r.content_type == "photo":
+            cap = (r.content or "").strip()
+            cap_part = f" подпись: {cap}" if cap else " (без подписи)"
+            lines.append(f"[{who}] [фото]{cap_part}")
         elif r.content:
             role = r.role
             lines.append(f"[{role} {who}] {r.content}")

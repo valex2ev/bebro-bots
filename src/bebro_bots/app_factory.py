@@ -86,7 +86,9 @@ def build_application(
     application.bot_data["feedback_sensitivity"] = app_cfg.feedback_sensitivity
 
     group = filters.ChatType.GROUPS
-    msg_filter = group & ~filters.COMMAND & (filters.TEXT | filters.Sticker.ALL | filters.Caption)
+    msg_filter = group & ~filters.COMMAND & (
+        filters.TEXT | filters.PHOTO | filters.Sticker.ALL | filters.Caption
+    )
 
     application.add_handler(MessageHandler(msg_filter, on_group_message))
     application.add_handler(CommandHandler("bebro_ping", on_ping, filters=group))

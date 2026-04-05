@@ -29,6 +29,7 @@ from bebro_bots.tone_profile import (
     merged_tone_values,
     situation_rules_limit,
 )
+from bebro_bots.telegram_vision import download_photo_file_bytes, sniff_image_mime
 from bebro_bots.triggers import message_allows_web_search
 
 if TYPE_CHECKING:
@@ -148,6 +149,23 @@ async def _record_incoming(
             content=message.caption,
             content_type="sticker",
             sticker_file_id=message.sticker.file_id,
+            photo_file_id=None,
+        )
+        return
+    if message.photo:
+        ph = message.photo[-1]
+        cap = message.caption or ""
+        db.append_message(
+            bot_id,
+            chat_id,
+            message_id=message.message_id,
+            user_id=uid,
+            username=uname,
+            role="user",
+            content=cap,
+            content_type="photo",
+            sticker_file_id=None,
+            photo_file_id=ph.file_id,
         )
         return
     text = message.text or message.caption or ""
@@ -161,6 +179,7 @@ async def _record_incoming(
         content=text,
         content_type="text",
         sticker_file_id=None,
+        photo_file_id=None,
     )
 
 
@@ -197,6 +216,7 @@ async def _execute_turn_result(
                 content=emoji,
                 content_type="text",
                 sticker_file_id=None,
+                photo_file_id=None,
             )
             return
         try:
@@ -223,6 +243,7 @@ async def _execute_turn_result(
                     content="[sticker]",
                     content_type="sticker",
                     sticker_file_id=fid,
+                    photo_file_id=None,
                 )
             except Exception:
                 logger.exception("send_sticker failed")
@@ -259,6 +280,7 @@ async def _execute_turn_result(
                 content=text,
                 content_type="text",
                 sticker_file_id=None,
+                photo_file_id=None,
             )
             return
         kwargs: dict = {"chat_id": chat_id, "text": text}
@@ -275,6 +297,7 @@ async def _execute_turn_result(
             content=text,
             content_type="text",
             sticker_file_id=None,
+            photo_file_id=None,
         )
 
 
@@ -345,6 +368,24 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if summary:
         user_lines.insert(1, f"Сжатый контекст (саммари): {summary}")
 
+    vision_image: tuple[bytes, str] | None = None
+    if message.photo and app_cfg.vision.enabled:
+        try:
+            raw = await download_photo_file_bytes(context.bot, message.photo[-1].file_id)
+            if len(raw) > app_cfg.vision.max_image_bytes:
+                logger.warning(
+                    "Фото слишком большое (%s байт), vision пропущен",
+                    len(raw),
+                )
+            else:
+                mime = sniff_image_mime(raw)
+                vision_image = (raw, mime)
+                user_lines.append(
+                    "К последнему сообщению пользователя приложено изображение — опиши или ответь по содержимому."
+                )
+        except Exception:
+            logger.exception("Не удалось загрузить фото для vision")
+
     try:
         result = await run_agent_turn(
             client=client,
@@ -358,6 +399,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             allow_web_search=allow_web_search,
             allow_mutations=allow_mutations,
             feedback_sensitivity=sens,
+            vision_image=vision_image,
         )
         await _execute_turn_result(
             result=result,
@@ -569,7 +611,7 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if r.role == "user"
         and r.user_id is not None
         and r.user_id != bot_uid
-        and (r.content or r.sticker_file_id)
+        and (r.content or r.sticker_file_id or r.content_type == "photo")
     ]
     if not candidates:
         return
@@ -577,6 +619,9 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     who = target.username or (str(target.user_id) if target.user_id else "?")
     if target.content_type == "sticker" and target.sticker_file_id:
         line = f"[{who}] [sticker file_id={target.sticker_file_id}]"
+    elif target.content_type == "photo":
+        cap = (target.content or "").strip()
+        line = f"[{who}] [фото] {cap or '(без подписи)'}"
     else:
         line = f"[user {who}] {target.content or ''}"
 

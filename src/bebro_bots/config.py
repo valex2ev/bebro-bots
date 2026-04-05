@@ -29,9 +29,17 @@ class BotPersonaConfig(BaseModel):
     sticker_set_names: list[str] = Field(default_factory=list)
 
 
+class VisionConfig(BaseModel):
+    """Передача изображений из Telegram в multimodal-модель OpenAI."""
+
+    enabled: bool = True
+    max_image_bytes: int = Field(default=20 * 1024 * 1024, ge=1024 * 100)
+
+
 class AppConfig(BaseModel):
     openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
+    vision: VisionConfig = Field(default_factory=VisionConfig)
     allowed_chat_ids: list[int] = Field(default_factory=list)
     admin_user_ids: list[int] = Field(default_factory=list)
     bots: list[BotPersonaConfig] = Field(default_factory=list)
