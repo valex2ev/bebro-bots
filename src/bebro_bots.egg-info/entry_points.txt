@@ -1,0 +1,2 @@
+[console_scripts]
+bebro-bots = bebro_bots.main:main

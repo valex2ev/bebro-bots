@@ -1,0 +1,35 @@
+# Скопируйте в config.yaml и поправьте. Токены — только через .env (см. token_env).
+
+openai:
+  api_key_env: OPENAI_API_KEY
+  model: gpt-4o-mini
+  base_url: null  # например https://api.openai.com/v1 — по умолчанию клиент OpenAI
+
+server:
+  webhook_host: "0.0.0.0"
+  webhook_port: 8080
+  # Базовый URL без слэша; для Cloudflare: https://your-domain.example
+  public_base_url: null
+
+# SQLite одним файлом на всех ботов (путь от корня проекта).
+sqlite_path: data/bebro.sqlite
+
+# 1 — мало контекста из предпочтений в промпте; 5 — максимум. По умолчанию 4.
+feedback_sensitivity: 4
+
+# Пустой список = принимать все чаты. Иначе только перечисленные chat_id (группы).
+allowed_chat_ids: []
+
+# Telegram user id через запятую в .env ADMIN_USER_IDS — кто может /bebroadmin_*
+admin_user_ids: []
+
+bots:
+  - id: biba
+    token_env: BEBRO_BIBA_BOT_TOKEN
+    username: bebro_biba_bot
+    mood_default: "спокойное любопытство"
+
+  - id: boba
+    token_env: BEBRO_BOBA_BOT_TOKEN
+    username: bebro_boba_bot
+    mood_default: "лёгкая ирония"
