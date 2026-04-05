@@ -23,6 +23,8 @@ allowed_chat_ids: []
 # Telegram user id через запятую в .env ADMIN_USER_IDS — кто может /bebroadmin_*
 admin_user_ids: []
 
+# У записи бота нет поля personality — текст личности только в БД (см. SPECIFICATION §7).
+# Если в старом config.yaml остался personality: — удалите строку.
 bots:
   - id: biba
     token_env: BEBRO_BIBA_BOT_TOKEN
