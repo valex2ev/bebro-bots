@@ -42,7 +42,6 @@ class VpnWatchConfig(BaseModel):
     enabled: bool = False
     check_interval_seconds: int = Field(default=120, ge=30, le=86400)
     reconnect_max_attempts: int = Field(default=5, ge=1, le=50)
-    reconnect_backoff_seconds: float = Field(default=5.0, ge=0.0, le=600.0)
     post_restart_wait_seconds: float = Field(default=15.0, ge=0.0, le=600.0)
     windows_service_name: str = Field(
         default="Adguard VPN Service",

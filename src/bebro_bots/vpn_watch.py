@@ -151,9 +151,6 @@ async def vpn_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             state["failure_notified"] = False
             return
 
-        if attempt < vw.reconnect_max_attempts:
-            await asyncio.sleep(vw.reconnect_backoff_seconds)
-
     logger.error(
         "VPN watch: не удалось восстановить канал после %s попыток",
         vw.reconnect_max_attempts,

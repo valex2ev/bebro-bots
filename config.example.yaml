@@ -40,8 +40,6 @@ admin_user_ids: []
 #   check_interval_seconds: 120
 #   # Максимум попыток Restart-Service за один эпизод обрыва.
 #   reconnect_max_attempts: 5
-#   # Пауза между неудачными попытками перезапуска (секунды).
-#   reconnect_backoff_seconds: 5
 #   # Пауза после каждого Restart-Service перед повторной проверкой (секунды).
 #   post_restart_wait_seconds: 15
 #   # Имя службы Windows для Restart-Service.
