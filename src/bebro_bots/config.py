@@ -52,17 +52,17 @@ class VpnWatchConfig(BaseModel):
         default=None,
         description="Путь к exe службы (справочно; перезапуск только по имени службы).",
     )
-    notify_chat_id: int | None = None
-    """Поле `id` бота из `bots`, который шлёт служебные сообщения о VPN."""
-    notify_bot_id: str | None = None
+    notify_bot_id: str | None = Field(
+        default=None,
+        description="id бота из bots, который шлёт уведомления о VPN во все чаты из chat_messages.",
+    )
 
     @model_validator(mode="after")
     def _notify_when_enabled(self) -> VpnWatchConfig:
-        if self.enabled:
-            if self.notify_chat_id is None or not self.notify_bot_id:
-                raise ValueError(
-                    "vpn_watch: при enabled=true задайте notify_chat_id и notify_bot_id (строка id бота из bots)"
-                )
+        if self.enabled and not self.notify_bot_id:
+            raise ValueError(
+                "vpn_watch: при enabled=true задайте notify_bot_id (строка id бота из bots)"
+            )
         return self
 
 

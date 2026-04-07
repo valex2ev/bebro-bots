@@ -13,6 +13,7 @@ from openai import AsyncOpenAI
 from telegram.ext import ContextTypes
 
 from bebro_bots.config import AppConfig
+from bebro_bots.db import Database
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,25 @@ def _fmt_ts(ts: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
 
 
+async def _broadcast_vpn_notice(
+    *,
+    bot: Any,
+    db: Database,
+    bot_id: str,
+    text: str,
+) -> None:
+    """Отправить текст во все chat_id из chat_messages (кроме служебного chat_id=0)."""
+    chat_ids = [c for c in db.distinct_chat_ids(bot_id) if c != 0]
+    if not chat_ids:
+        logger.info("VPN watch: нет чатов в chat_messages — уведомление не отправляется")
+        return
+    for cid in chat_ids:
+        try:
+            await bot.send_message(chat_id=cid, text=text)
+        except Exception:
+            logger.warning("VPN watch: не удалось отправить в chat_id=%s", cid, exc_info=True)
+
+
 async def vpn_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     if sys.platform != "win32":
         return
@@ -82,6 +102,7 @@ async def vpn_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     client: AsyncOpenAI = app.bot_data["openai_client"]
     bot = app.bot
+    db: Database = app.bot_data["db"]
 
     state: dict[str, Any] = app.bot_data.setdefault(
         "vpn_watch_state",
@@ -125,10 +146,7 @@ async def vpn_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 f"Восстановление: {_fmt_ts(recovery_ts)}\n"
                 f"Попыток перезапуска службы: {attempt}"
             )
-            try:
-                await bot.send_message(chat_id=vw.notify_chat_id, text=text)
-            except Exception:
-                logger.exception("VPN watch: не удалось отправить сообщение о восстановлении")
+            await _broadcast_vpn_notice(bot=bot, db=db, bot_id=persona.id, text=text)
             state["failure_detected_at"] = None
             state["failure_notified"] = False
             return
@@ -146,8 +164,5 @@ async def vpn_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             f"{vw.reconnect_max_attempts} попыток перезапуска службы.\n"
             f"Первое обнаружение сбоя: {_fmt_ts(detected_at)}"
         )
-        try:
-            await bot.send_message(chat_id=vw.notify_chat_id, text=fail_text)
-        except Exception:
-            logger.exception("VPN watch: не удалось отправить сообщение об ошибке")
+        await _broadcast_vpn_notice(bot=bot, db=db, bot_id=persona.id, text=fail_text)
         state["failure_notified"] = True

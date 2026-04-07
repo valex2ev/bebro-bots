@@ -80,10 +80,9 @@ def build_application(
                         name=f"vpn_watch_{persona.id}",
                     )
                     logger.info(
-                        "VPN watch: интервал %s с, служба «%s», уведомления в chat_id=%s",
+                        "VPN watch: интервал %s с, служба «%s», уведомления во все чаты из chat_messages",
                         vw.check_interval_seconds,
                         vw.windows_service_name,
-                        vw.notify_chat_id,
                     )
                 else:
                     logger.warning(
