@@ -140,6 +140,16 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_sr_bot_chat
                   ON situation_rules(bot_id, chat_id, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS chat_aliases (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  chat_id INTEGER NOT NULL,
+                  alias_text TEXT NOT NULL,
+                  created_at REAL NOT NULL,
+                  UNIQUE (chat_id, alias_text)
+                );
+                CREATE INDEX IF NOT EXISTS idx_chat_aliases_chat
+                  ON chat_aliases(chat_id);
                 """
             )
             self._migrate(conn)
@@ -153,6 +163,48 @@ class Database:
         cm = {r[1] for r in conn.execute("PRAGMA table_info(chat_messages)").fetchall()}
         if "photo_file_id" not in cm:
             conn.execute("ALTER TABLE chat_messages ADD COLUMN photo_file_id TEXT")
+
+    @staticmethod
+    def normalize_alias_text(raw: str) -> str:
+        return raw.strip().lower()
+
+    def list_chat_aliases(self, chat_id: int) -> list[str]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT alias_text FROM chat_aliases
+                WHERE chat_id=?
+                ORDER BY id ASC
+                """,
+                (chat_id,),
+            ).fetchall()
+        return [str(r["alias_text"]) for r in rows]
+
+    def add_chat_alias(self, chat_id: int, raw: str) -> bool:
+        key = self.normalize_alias_text(raw)
+        if not key:
+            return False
+        now = time.time()
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO chat_aliases (chat_id, alias_text, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (chat_id, key, now),
+            )
+            return cur.rowcount > 0
+
+    def remove_chat_alias(self, chat_id: int, raw: str) -> bool:
+        key = self.normalize_alias_text(raw)
+        if not key:
+            return False
+        with self.connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM chat_aliases WHERE chat_id=? AND alias_text=?",
+                (chat_id, key),
+            )
+            return cur.rowcount > 0
 
     def get_settings(self, bot_id: str, chat_id: int) -> dict[str, Any]:
         with self.connect() as conn:
@@ -522,4 +574,8 @@ class Database:
             conn.execute(
                 "DELETE FROM situation_rules WHERE bot_id=? AND chat_id=?",
                 (bot_id, chat_id),
+            )
+            conn.execute(
+                "DELETE FROM chat_aliases WHERE chat_id=?",
+                (chat_id,),
             )

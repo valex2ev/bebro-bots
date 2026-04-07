@@ -38,6 +38,8 @@ MUTATING_TOOL_NAMES = frozenset(
         "update_conversation_summary",
         "add_situation_rule",
         "set_bot_persona",
+        "add_chat_alias",
+        "remove_chat_alias",
     }
 )
 
@@ -217,6 +219,36 @@ def _tools_schema(*, include_web_search: bool = False) -> list[dict[str, Any]]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "add_chat_alias",
+                "description": (
+                    "Сохранить текстовый триггер для текущего чата: если эта подстрока есть в сообщении, "
+                    "все боты в группе откликаются как на явное обращение (как при @username). "
+                    "Только по просьбе человека."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string", "description": "Подстрока-триггер"}},
+                    "required": ["text"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "remove_chat_alias",
+                "description": "Удалить ранее сохранённый текстовый триггер для текущего чата.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                    "additionalProperties": False,
+                },
+            },
+        },
     ]
     if include_web_search:
         tools.append(
@@ -371,7 +403,10 @@ async def run_agent_turn(
         messages.append(
             {
                 "role": "user",
-                "content": "Системное напоминание: пользователь явно упомянул тебя через @username — дай содержательный ответ (не только одну реакцию), если нет просьбы именно о реакции.",
+                "content": (
+                    "Системное напоминание: к тебе явно обратились (@username или сохранённый текстовый алиас чата) — "
+                    "дай содержательный ответ (не только одну реакцию), если нет просьбы именно о реакции."
+                ),
             }
         )
 
@@ -500,6 +535,7 @@ async def _dispatch_tool(
             persona_text = db.get_bot_persona(bot_id)
             tone_drift = db.get_tone_drift(bot_id)
             rules_payload = [{"trigger": t, "instruction": i} for t, i in rules]
+            chat_aliases = db.list_chat_aliases(chat_id)
             return json.dumps(
                 {
                     "persona_text": persona_text,
@@ -509,6 +545,7 @@ async def _dispatch_tool(
                     "conversation_summary": summary,
                     "long_instructions": mem,
                     "situation_rules": rules_payload,
+                    "chat_aliases": chat_aliases,
                     "feedback_sensitivity": feedback_sensitivity,
                 },
                 ensure_ascii=False,
@@ -546,6 +583,18 @@ async def _dispatch_tool(
         if name == "set_bot_persona":
             db.set_bot_persona(bot_id, str(args.get("text", "")))
             return json.dumps({"ok": True}, ensure_ascii=False)
+        if name == "add_chat_alias":
+            added = db.add_chat_alias(chat_id, str(args.get("text", "")))
+            return json.dumps(
+                {"ok": True, "added": added, "aliases": db.list_chat_aliases(chat_id)},
+                ensure_ascii=False,
+            )
+        if name == "remove_chat_alias":
+            removed = db.remove_chat_alias(chat_id, str(args.get("text", "")))
+            return json.dumps(
+                {"ok": True, "removed": removed, "aliases": db.list_chat_aliases(chat_id)},
+                ensure_ascii=False,
+            )
     except Exception as e:
         logger.exception("tool error")
         return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
@@ -565,7 +614,7 @@ def build_system_prompt(
     m = mood or "нейтральное"
     tools_enum = (
         "get_group_state, set_preference, add_long_instruction, set_mood, update_conversation_summary, "
-        "add_situation_rule, set_bot_persona"
+        "add_situation_rule, set_bot_persona, add_chat_alias, remove_chat_alias"
     )
     if allow_web_search:
         tools_enum += ", web_search (только в этом ответе — пользователь явно запросил поиск ключевым словом)"
@@ -600,7 +649,8 @@ def build_system_prompt(
         "Важно: в поле text у complete_turn и в любом тексте для пользователя — только живая реплика для чата. "
         "Никогда не пиши имена инструментов, JSON, «complete_turn», «action=…» и подобные пометки — их увидят люди.\n"
         "Просьбы о длине/частоте/тоне фиксируй через set_preference (ключи tone_*, response_depth, verbosity, frequency, "
-        "числовые вероятности и т.д.). Ситуационные правила — add_situation_rule.\n"
+        "числовые вероятности и т.д.). Ситуационные правила — add_situation_rule. "
+        "Текстовые триггеры обращения ко всем ботам в чате — add_chat_alias / remove_chat_alias.\n"
     )
 
 

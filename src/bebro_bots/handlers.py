@@ -118,6 +118,13 @@ def _format_params_message(
             lines.append(f"  → {i}")
     else:
         lines.append("(нет)")
+    aliases = db.list_chat_aliases(chat_id)
+    lines.extend(["", "— Текстовые алиасы чата (отклик всех ботов в этом чате) —"])
+    if aliases:
+        for a in aliases:
+            lines.append(f"• {a}")
+    else:
+        lines.append("(нет)")
     summ = db.get_summary(bot_id, chat_id)
     lines.extend(["", "— Саммари —", summ or "(нет)"])
     return "\n".join(lines)
@@ -328,11 +335,13 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     bot = context.bot
     me = await bot.get_me()
     settings = db.get_settings(persona.id, chat_id)
+    chat_aliases = db.list_chat_aliases(chat_id)
     eng = decide_engagement(
         message,
         bot_id=me.id,
         bot_username=persona.username,
         settings=settings,
+        chat_aliases=chat_aliases,
     )
     if not eng.call_llm:
         return
