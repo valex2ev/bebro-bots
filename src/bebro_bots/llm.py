@@ -252,10 +252,20 @@ def _tools_schema(*, include_web_search: bool = False) -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "remove_chat_alias",
-                "description": "Удалить ранее сохранённый текстовый триггер для текущего чата.",
+                "description": (
+                    "Удалить сохранённый у этого бота текстовый триггер (алиас) в чате. "
+                    "Используй, когда человек просит перестать откликаться на фразу: например «перестань откликаться на …», "
+                    "«убери алиас …», «забудь триггер …». В поле text передай саму подстроку-триггер (как в списке алиасов, "
+                    "без лишних слов). Те же ограничения, что у add_chat_alias (не @ другого бота без обращения к тебе)."
+                ),
                 "parameters": {
                     "type": "object",
-                    "properties": {"text": {"type": "string"}},
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "Подстрока-триггер для удаления (как сохраняли)",
+                        }
+                    },
                     "required": ["text"],
                     "additionalProperties": False,
                 },
@@ -702,9 +712,9 @@ def build_system_prompt(
         "Никогда не пиши имена инструментов, JSON, «complete_turn», «action=…» и подобные пометки — их увидят люди.\n"
         "Просьбы о длине/частоте/тоне фиксируй через set_preference (ключи tone_*, response_depth, verbosity, frequency, "
         "числовые вероятности и т.д.). Ситуационные правила — add_situation_rule. "
-        "Различай: «отзывайтесь на фразу …» — add_chat_alias / remove_chat_alias (алиас только у этого бота; если в сообщении @ "
-        "другого бота из чата — инструмент недоступен). Без @username людей и без логинов Telegram; «называйте кого-то так-то» — "
-        "add_long_instruction, не add_chat_alias.\n"
+        "Различай: «отзывайтесь на фразу …» — add_chat_alias; «перестань откликаться на …» / «убери алиас …» — remove_chat_alias "
+        "с text=фраза (алиас только у этого бота; если в сообщении @ другого бота без обращения к тебе — инструменты недоступны). "
+        "Без @username людей и без логинов Telegram; «называйте кого-то так-то» — add_long_instruction, не add_chat_alias.\n"
     )
 
 
