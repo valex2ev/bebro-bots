@@ -32,15 +32,23 @@ admin_user_ids: []
 # Если в старом config.yaml остался personality: — удалите строку.
 #
 # Мониторинг VPN (Windows): проверка Telegram + OpenAI, перезапуск службы AdGuard.
-# Задача вешается только на процесс бота с notify_bot_id; уведомления — во все чаты из chat_messages.
+# Уведомления — во все чаты из chat_messages для выбранного бота (кроме chat_id=0).
 # vpn_watch:
-#   enabled: true
+#   # Включить фоновую проверку и перезапуск службы (только Windows).
+#   enabled: false
+#   # Интервал между проверками канала (секунды, не меньше 30).
 #   check_interval_seconds: 120
+#   # Максимум попыток Restart-Service за один эпизод обрыва.
 #   reconnect_max_attempts: 5
+#   # Пауза между неудачными попытками перезапуска (секунды).
 #   reconnect_backoff_seconds: 5
+#   # Пауза после каждого Restart-Service перед повторной проверкой (секунды).
 #   post_restart_wait_seconds: 15
+#   # Имя службы Windows для Restart-Service.
 #   windows_service_name: "Adguard VPN Service"
+#   # Путь к exe — справочно; в коде используется только имя службы.
 #   service_exe_path: "C:\\Program Files\\AdGuardVpn\\AdGuardVpnSvc.exe"
+#   # id бота из bots: задача VPN только у этого экземпляра, уведомления от его токена.
 #   notify_bot_id: biba
 
 bots:
