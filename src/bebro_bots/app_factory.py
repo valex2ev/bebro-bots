@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from typing import TYPE_CHECKING
 
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
@@ -18,6 +19,7 @@ from bebro_bots.handlers import (
     proactive_reaction_job,
     random_tone_job,
 )
+from bebro_bots.vpn_watch import vpn_watch_job
 
 if TYPE_CHECKING:
     pass
@@ -68,6 +70,25 @@ def build_application(
                 first=240,
                 name=f"random_tone_{persona.id}",
             )
+            vw = app_cfg.vpn_watch
+            if vw.enabled and persona.id == vw.notify_bot_id:
+                if sys.platform == "win32":
+                    jq.run_repeating(
+                        vpn_watch_job,
+                        interval=vw.check_interval_seconds,
+                        first=75,
+                        name=f"vpn_watch_{persona.id}",
+                    )
+                    logger.info(
+                        "VPN watch: интервал %s с, служба «%s», уведомления в chat_id=%s",
+                        vw.check_interval_seconds,
+                        vw.windows_service_name,
+                        vw.notify_chat_id,
+                    )
+                else:
+                    logger.warning(
+                        "vpn_watch включён в конфиге, но платформа не Windows — фоновая задача не регистрируется"
+                    )
         else:
             logger.warning("JobQueue недоступна — инициатива отключена (установите python-telegram-bot[job-queue]).")
 

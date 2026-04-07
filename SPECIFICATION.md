@@ -106,6 +106,7 @@
 
 - Параметры LLM, токены ботов, пути к БД — в **конфиге и/или `.env`**, не в репозитории.
 - Персона бота **не** задаётся в YAML; опционально **`feedback_sensitivity`** (1–5), блок **`vision`** (включение передачи фото в API и лимит размера).
+- Опционально **`vpn_watch`** (корневой блок конфига): периодическая проверка доступности **Telegram Bot API** и **OpenAI API**; при сбое — до **`reconnect_max_attempts`** раз перезапуск службы Windows (**`Restart-Service`** по **`windows_service_name`**), пауза **`post_restart_wait_seconds`** после каждого рестарта, пауза **`reconnect_backoff_seconds`** между попытками. Уведомление в чат **`notify_chat_id`** отправляет бот с **`notify_bot_id`** (один из `bots[].id`); фоновая задача регистрируется **только** у этого экземпляра. Работает **только на Windows** (`sys.platform == win32`). Поле **`service_exe_path`** справочное (в коде перезапуск по имени службы). Учётная запись процесса должна иметь право перезапускать указанную службу.
 - **Токены и ключи не коммитить** (`.gitignore` для `.env` и локальных sqlite).
 
 ---
@@ -135,7 +136,7 @@
 |--------|---------|
 | Стек | **Python 3.11+**, `python-telegram-bot` (async / v21+), `openai` (AsyncOpenAI), FastAPI + uvicorn для webhook. |
 | Запуск | `python -m bebro_bots` или `python -m bebro_bots polling` — long polling для нескольких ботов в отдельных потоках; `python -m bebro_bots webhook` — один HTTP-порт, пути `/hook/<id>` где `id` — поле `bots[].id` в YAML. |
-| Конфиг | `config.yaml` (локально, не в git; при отсутствии читается `config.example.yaml`). Секреты: `.env`. Путь к БД: `sqlite_path` (по умолчанию `data/bebro.sqlite`). Поле **`feedback_sensitivity`** (1–5, по умолчанию 4). **`vision`**: `enabled`, `max_image_bytes`. Персона бота — только БД, см. §7. |
+| Конфиг | `config.yaml` (локально, не в git; при отсутствии читается `config.example.yaml`). Секреты: `.env`. Путь к БД: `sqlite_path` (по умолчанию `data/bebro.sqlite`). Поле **`feedback_sensitivity`** (1–5, по умолчанию 4). **`vision`**: `enabled`, `max_image_bytes`. Персона бота — только БД, см. §7. Опционально **`vpn_watch`**: см. §12 (мониторинг VPN на Windows). |
 | Админы | `admin_user_ids` в YAML и/или переменная **`ADMIN_USER_IDS`** в `.env` (список через запятую). Команды: `/bebroadmin_reset` (очистка истории и долгой памяти **этого** бота в чате + **общие** текстовые алиасы `chat_aliases` для `chat_id`), `/bebroadmin_status` (только для этих id). |
 | Команды в группе | `/bebro_ping`, **`/bebro_params`** или **`/bebro_params@username_бота`** при нескольких ботах; админские — см. выше. |
 | Инструменты LLM | `get_group_state`, `set_preference` (в т.ч. оси `tone_*`, `response_depth`, `proactive_reaction_probability`, …), `add_long_instruction`, **`add_situation_rule`**, **`set_bot_persona`**, `set_mood`, `update_conversation_summary`, **`add_chat_alias`**, **`remove_chat_alias`** (текстовые триггеры обращения ко всем ботам в чате — только БД, не в YAML), опционально **`web_search`** (Tavily, только при триггере «найди» в сообщении), **`complete_turn`** (обязательное завершение хода: message / reaction / sticker / none). Запись в БД через инструменты **блокируется**, если сообщение инициатора — от бота. |
@@ -146,5 +147,6 @@
 | Стикерпаки бота | Поле `sticker_set_names` у бота в YAML — при старте вызывается `getStickerSet`, стикеры кладутся в БД с `chat_id=0` и участвуют в случайном выборе вместе с групповыми. |
 | Саммари | Периодически (случайно ~6% после ответа при ≥15 сообщениях в окне) вызывается отдельный запрос к модели для обновления сжатого контекста. |
 | Фото в чате | Обработчик принимает **`filters.PHOTO`**. В SQLite для сообщения сохраняются `content_type=photo`, `photo_file_id`, подпись в `content`. В запрос к LLM изображение уходит только **в текущем ходе** (не для всей истории). |
+| VPN (Windows) | Фоновая задача JobQueue по **`vpn_watch.check_interval_seconds`** (только у бота **`notify_bot_id`**): проверка `get_me` + `models.list()`; при сбое — **`Restart-Service`**; после успеха — сообщение в **`notify_chat_id`** (время обнаружения, восстановления, число попыток); при исчерпании попыток — одно сообщение об ошибке до следующего успешного прогона проверки. |
 
-*Версия документа: §4, §8, §15 — текстовые алиасы чата (`chat_aliases`, MVP); 2026-04-07.*
+*Версия документа: §12, §15 — `vpn_watch` (Telegram+OpenAI, Restart-Service); 2026-04-07.*

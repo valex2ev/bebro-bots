@@ -6,7 +6,7 @@ from typing import Any
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class OpenAIConfig(BaseModel):
@@ -36,6 +36,36 @@ class VisionConfig(BaseModel):
     max_image_bytes: int = Field(default=20 * 1024 * 1024, ge=1024 * 100)
 
 
+class VpnWatchConfig(BaseModel):
+    """Контроль VPN: проверка Telegram + OpenAI, перезапуск службы Windows (только при enabled)."""
+
+    enabled: bool = False
+    check_interval_seconds: int = Field(default=120, ge=30, le=86400)
+    reconnect_max_attempts: int = Field(default=5, ge=1, le=50)
+    reconnect_backoff_seconds: float = Field(default=5.0, ge=0.0, le=600.0)
+    post_restart_wait_seconds: float = Field(default=15.0, ge=0.0, le=600.0)
+    windows_service_name: str = Field(
+        default="Adguard VPN Service",
+        description="Имя службы Windows (Restart-Service).",
+    )
+    service_exe_path: str | None = Field(
+        default=None,
+        description="Путь к exe службы (справочно; перезапуск только по имени службы).",
+    )
+    notify_chat_id: int | None = None
+    """Поле `id` бота из `bots`, который шлёт служебные сообщения о VPN."""
+    notify_bot_id: str | None = None
+
+    @model_validator(mode="after")
+    def _notify_when_enabled(self) -> VpnWatchConfig:
+        if self.enabled:
+            if self.notify_chat_id is None or not self.notify_bot_id:
+                raise ValueError(
+                    "vpn_watch: при enabled=true задайте notify_chat_id и notify_bot_id (строка id бота из bots)"
+                )
+        return self
+
+
 class AppConfig(BaseModel):
     openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
@@ -46,6 +76,19 @@ class AppConfig(BaseModel):
     sqlite_path: str = "data/bebro.sqlite"
     """1 — минимум контекста из предпочтений; 5 — максимум. По умолчанию 4."""
     feedback_sensitivity: int = Field(default=4, ge=1, le=5)
+    vpn_watch: VpnWatchConfig = Field(default_factory=VpnWatchConfig)
+
+    @model_validator(mode="after")
+    def _vpn_notify_bot_in_list(self) -> AppConfig:
+        if not self.vpn_watch.enabled:
+            return self
+        ids = {b.id for b in self.bots}
+        nid = self.vpn_watch.notify_bot_id
+        if nid and nid not in ids:
+            raise ValueError(
+                f"vpn_watch.notify_bot_id={nid!r} отсутствует в списке bots[].id"
+            )
+        return self
 
 
 def _resolve_config_path() -> Path:
