@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -9,7 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from bebro_bots.chat_aliases_policy import purge_username_like_aliases, reject_reason_for_chat_alias
 from bebro_bots.tone_profile import DEFAULT_TONE_SETTINGS
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_CHAT_SETTINGS: dict[str, Any] = {
     "window_messages": 40,
@@ -163,6 +167,12 @@ class Database:
         cm = {r[1] for r in conn.execute("PRAGMA table_info(chat_messages)").fetchall()}
         if "photo_file_id" not in cm:
             conn.execute("ALTER TABLE chat_messages ADD COLUMN photo_file_id TEXT")
+        n = purge_username_like_aliases(conn)
+        if n:
+            logger.info(
+                "Миграция chat_aliases: удалено строк с @username/похожих на логин: %s",
+                n,
+            )
 
     @staticmethod
     def normalize_alias_text(raw: str) -> str:
@@ -181,6 +191,8 @@ class Database:
         return [str(r["alias_text"]) for r in rows]
 
     def add_chat_alias(self, chat_id: int, raw: str) -> bool:
+        if reject_reason_for_chat_alias(raw) is not None:
+            return False
         key = self.normalize_alias_text(raw)
         if not key:
             return False

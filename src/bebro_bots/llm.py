@@ -8,6 +8,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from bebro_bots.chat_aliases_policy import reject_reason_for_chat_alias
 from bebro_bots.db import Database
 from bebro_bots.telegram_vision import data_url_for_openai
 from bebro_bots.tone_profile import TONE_KEYS, long_memory_limit, situation_rules_limit
@@ -143,7 +144,11 @@ def _tools_schema(*, include_web_search: bool = False) -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "add_long_instruction",
-                "description": "Добавить долгую инструкцию, которая должна влиять на поведение в этом чате.",
+                "description": (
+                    "Добавить долгую инструкцию для поведения в чате: в т.ч. как называть участников, "
+                    "прозвища, кто как к кому обращается. Не использовать для триггеров «откликайтесь на слово» — "
+                    "под это add_chat_alias."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {"text": {"type": "string"}},
@@ -224,13 +229,20 @@ def _tools_schema(*, include_web_search: bool = False) -> list[dict[str, Any]]:
             "function": {
                 "name": "add_chat_alias",
                 "description": (
-                    "Сохранить текстовый триггер для текущего чата: если эта подстрока есть в сообщении, "
-                    "все боты в группе откликаются как на явное обращение (как при @username). "
-                    "Только по просьбе человека."
+                    "Только если люди просят, чтобы боты откликались на фразу/обращение к ботам "
+                    "(например «парни», «ребята»). Не для правил вида «называйте пользователя X так-то» — "
+                    "это add_long_instruction. Нельзя: @username, строки вида логина Telegram (ASCII 5–32 символа, "
+                    "от буквы и цифры/подчёркивания). "
+                    "Если подстрока есть в сообщении — все боты в группе откликаются как при @username бота."
                 ),
                 "parameters": {
                     "type": "object",
-                    "properties": {"text": {"type": "string", "description": "Подстрока-триггер"}},
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "Подстрока-триггер (без @ и без логинов Telegram)",
+                        }
+                    },
                     "required": ["text"],
                     "additionalProperties": False,
                 },
@@ -584,7 +596,21 @@ async def _dispatch_tool(
             db.set_bot_persona(bot_id, str(args.get("text", "")))
             return json.dumps({"ok": True}, ensure_ascii=False)
         if name == "add_chat_alias":
-            added = db.add_chat_alias(chat_id, str(args.get("text", "")))
+            raw_alias = str(args.get("text", ""))
+            reason = reject_reason_for_chat_alias(raw_alias)
+            if reason:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": reason,
+                        "hint": (
+                            "Алиасы — только фразы, на которые боты должны откликаться. "
+                            "Правила «называйте участника X так-то» — используй add_long_instruction, не add_chat_alias."
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
+            added = db.add_chat_alias(chat_id, raw_alias)
             return json.dumps(
                 {"ok": True, "added": added, "aliases": db.list_chat_aliases(chat_id)},
                 ensure_ascii=False,
@@ -650,7 +676,8 @@ def build_system_prompt(
         "Никогда не пиши имена инструментов, JSON, «complete_turn», «action=…» и подобные пометки — их увидят люди.\n"
         "Просьбы о длине/частоте/тоне фиксируй через set_preference (ключи tone_*, response_depth, verbosity, frequency, "
         "числовые вероятности и т.д.). Ситуационные правила — add_situation_rule. "
-        "Текстовые триггеры обращения ко всем ботам в чате — add_chat_alias / remove_chat_alias.\n"
+        "Различай: «отзывайтесь на фразу …» (обращение к ботам) — add_chat_alias / remove_chat_alias, без @username людей и "
+        "без логинов в стиле Telegram; «называйте кого-то так-то» — add_long_instruction, не add_chat_alias.\n"
     )
 
 
