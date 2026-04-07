@@ -147,13 +147,14 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS chat_aliases (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  bot_id TEXT NOT NULL,
                   chat_id INTEGER NOT NULL,
                   alias_text TEXT NOT NULL,
                   created_at REAL NOT NULL,
-                  UNIQUE (chat_id, alias_text)
+                  UNIQUE (bot_id, chat_id, alias_text)
                 );
-                CREATE INDEX IF NOT EXISTS idx_chat_aliases_chat
-                  ON chat_aliases(chat_id);
+                CREATE INDEX IF NOT EXISTS idx_chat_aliases_bot_chat
+                  ON chat_aliases(bot_id, chat_id);
                 """
             )
             self._migrate(conn)
@@ -167,6 +168,7 @@ class Database:
         cm = {r[1] for r in conn.execute("PRAGMA table_info(chat_messages)").fetchall()}
         if "photo_file_id" not in cm:
             conn.execute("ALTER TABLE chat_messages ADD COLUMN photo_file_id TEXT")
+        self._migrate_chat_aliases_bot_id(conn)
         n = purge_username_like_aliases(conn)
         if n:
             logger.info(
@@ -174,23 +176,66 @@ class Database:
                 n,
             )
 
+    def _migrate_chat_aliases_bot_id(self, conn: sqlite3.Connection) -> None:
+        """Старый формат без bot_id: дублируем каждую строку на каждый bot_id из chat_messages для этого чата."""
+        try:
+            ca_cols = {r[1] for r in conn.execute("PRAGMA table_info(chat_aliases)").fetchall()}
+        except sqlite3.OperationalError:
+            return
+        if not ca_cols or "bot_id" in ca_cols:
+            return
+        logger.info("Миграция chat_aliases: добавление bot_id (раздельные алиасы на бота)")
+        conn.execute("ALTER TABLE chat_aliases RENAME TO chat_aliases_old")
+        conn.execute(
+            """
+            CREATE TABLE chat_aliases (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              bot_id TEXT NOT NULL,
+              chat_id INTEGER NOT NULL,
+              alias_text TEXT NOT NULL,
+              created_at REAL NOT NULL,
+              UNIQUE (bot_id, chat_id, alias_text)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_aliases_bot_chat ON chat_aliases(bot_id, chat_id)"
+        )
+        old_rows = conn.execute("SELECT chat_id, alias_text, created_at FROM chat_aliases_old").fetchall()
+        for r in old_rows:
+            cid = int(r["chat_id"])
+            bots = conn.execute(
+                "SELECT DISTINCT bot_id FROM chat_messages WHERE chat_id=?",
+                (cid,),
+            ).fetchall()
+            for b in bots:
+                bid = str(b["bot_id"])
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO chat_aliases (bot_id, chat_id, alias_text, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (bid, cid, str(r["alias_text"]), float(r["created_at"])),
+                )
+        conn.execute("DROP TABLE chat_aliases_old")
+
     @staticmethod
     def normalize_alias_text(raw: str) -> str:
         return raw.strip().lower()
 
-    def list_chat_aliases(self, chat_id: int) -> list[str]:
+    def list_chat_aliases(self, bot_id: str, chat_id: int) -> list[str]:
         with self.connect() as conn:
             rows = conn.execute(
                 """
                 SELECT alias_text FROM chat_aliases
-                WHERE chat_id=?
+                WHERE bot_id=? AND chat_id=?
                 ORDER BY id ASC
                 """,
-                (chat_id,),
+                (bot_id, chat_id),
             ).fetchall()
         return [str(r["alias_text"]) for r in rows]
 
-    def add_chat_alias(self, chat_id: int, raw: str) -> bool:
+    def add_chat_alias(self, bot_id: str, chat_id: int, raw: str) -> bool:
         if reject_reason_for_chat_alias(raw) is not None:
             return False
         key = self.normalize_alias_text(raw)
@@ -200,21 +245,21 @@ class Database:
         with self.connect() as conn:
             cur = conn.execute(
                 """
-                INSERT OR IGNORE INTO chat_aliases (chat_id, alias_text, created_at)
-                VALUES (?, ?, ?)
+                INSERT OR IGNORE INTO chat_aliases (bot_id, chat_id, alias_text, created_at)
+                VALUES (?, ?, ?, ?)
                 """,
-                (chat_id, key, now),
+                (bot_id, chat_id, key, now),
             )
             return cur.rowcount > 0
 
-    def remove_chat_alias(self, chat_id: int, raw: str) -> bool:
+    def remove_chat_alias(self, bot_id: str, chat_id: int, raw: str) -> bool:
         key = self.normalize_alias_text(raw)
         if not key:
             return False
         with self.connect() as conn:
             cur = conn.execute(
-                "DELETE FROM chat_aliases WHERE chat_id=? AND alias_text=?",
-                (chat_id, key),
+                "DELETE FROM chat_aliases WHERE bot_id=? AND chat_id=? AND alias_text=?",
+                (bot_id, chat_id, key),
             )
             return cur.rowcount > 0
 
@@ -588,6 +633,6 @@ class Database:
                 (bot_id, chat_id),
             )
             conn.execute(
-                "DELETE FROM chat_aliases WHERE chat_id=?",
-                (chat_id,),
+                "DELETE FROM chat_aliases WHERE bot_id=? AND chat_id=?",
+                (bot_id, chat_id),
             )

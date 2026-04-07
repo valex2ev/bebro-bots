@@ -30,6 +30,7 @@ from bebro_bots.tone_profile import (
     situation_rules_limit,
 )
 from bebro_bots.telegram_vision import download_photo_file_bytes, sniff_image_mime
+from bebro_bots.chat_aliases_policy import chat_alias_mutations_allowed_for_message
 from bebro_bots.triggers import message_allows_web_search
 
 if TYPE_CHECKING:
@@ -118,8 +119,8 @@ def _format_params_message(
             lines.append(f"  → {i}")
     else:
         lines.append("(нет)")
-    aliases = db.list_chat_aliases(chat_id)
-    lines.extend(["", "— Текстовые алиасы чата (отклик всех ботов в этом чате) —"])
+    aliases = db.list_chat_aliases(bot_id, chat_id)
+    lines.extend(["", "— Текстовые алиасы (отклик этого бота по подстроке в сообщении) —"])
     if aliases:
         for a in aliases:
             lines.append(f"• {a}")
@@ -335,7 +336,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     bot = context.bot
     me = await bot.get_me()
     settings = db.get_settings(persona.id, chat_id)
-    chat_aliases = db.list_chat_aliases(chat_id)
+    chat_aliases = db.list_chat_aliases(persona.id, chat_id)
     eng = decide_engagement(
         message,
         bot_id=me.id,
@@ -351,6 +352,11 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     msg_text = message.text or message.caption or ""
     allow_web_search = message_allows_web_search(msg_text)
     allow_mutations = _allow_learning(message)
+    allow_chat_alias_tools = chat_alias_mutations_allowed_for_message(
+        msg_text,
+        my_username=persona.username,
+        all_bot_usernames=[b.username for b in app_cfg.bots],
+    )
     sens = int(app_cfg.feedback_sensitivity)
 
     mood = db.get_mood(persona.id) or persona.mood_default
@@ -407,6 +413,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             force_substantive_reply=eng.force_reply,
             allow_web_search=allow_web_search,
             allow_mutations=allow_mutations,
+            allow_chat_alias_tools=allow_chat_alias_tools,
             feedback_sensitivity=sens,
             vision_image=vision_image,
         )

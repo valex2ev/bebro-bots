@@ -229,11 +229,11 @@ def _tools_schema(*, include_web_search: bool = False) -> list[dict[str, Any]]:
             "function": {
                 "name": "add_chat_alias",
                 "description": (
-                    "Только если люди просят, чтобы боты откликались на фразу/обращение к ботам "
-                    "(например «парни», «ребята»). Не для правил вида «называйте пользователя X так-то» — "
-                    "это add_long_instruction. Нельзя: @username, строки вида логина Telegram (ASCII 5–32 символа, "
-                    "от буквы и цифры/подчёркивания). "
-                    "Если подстрока есть в сообщении — все боты в группе откликаются как при @username бота."
+                    "Только если люди просят, чтобы этот бот откликался на фразу (алиас хранится на этого бота в чате). "
+                    "Если в сообщении указан другой бот через @ — инструмент недоступен (кроме случая, когда обращаются к тебе). "
+                    "Не для «называйте пользователя X так-то» — add_long_instruction. "
+                    "Нельзя: @username людей, строки-логины Telegram (ASCII). "
+                    "Подстрока в тексте — отклик как при @username только у ботов, у которых сохранён этот алиас."
                 ),
                 "parameters": {
                     "type": "object",
@@ -404,6 +404,7 @@ async def run_agent_turn(
     force_substantive_reply: bool,
     allow_web_search: bool = False,
     allow_mutations: bool = True,
+    allow_chat_alias_tools: bool = True,
     feedback_sensitivity: int = 4,
     vision_image: tuple[bytes, str] | None = None,
 ) -> CompleteTurnResult:
@@ -467,6 +468,7 @@ async def run_agent_turn(
                         chat_id=chat_id,
                         allow_web_search=allow_web_search,
                         allow_mutations=allow_mutations,
+                        allow_chat_alias_tools=allow_chat_alias_tools,
                         feedback_sensitivity=feedback_sensitivity,
                     )
                 messages.append(
@@ -511,6 +513,7 @@ async def _dispatch_tool(
     chat_id: int,
     allow_web_search: bool = False,
     allow_mutations: bool = True,
+    allow_chat_alias_tools: bool = True,
     feedback_sensitivity: int = 4,
 ) -> str:
     try:
@@ -547,7 +550,7 @@ async def _dispatch_tool(
             persona_text = db.get_bot_persona(bot_id)
             tone_drift = db.get_tone_drift(bot_id)
             rules_payload = [{"trigger": t, "instruction": i} for t, i in rules]
-            chat_aliases = db.list_chat_aliases(chat_id)
+            chat_aliases = db.list_chat_aliases(bot_id, chat_id)
             return json.dumps(
                 {
                     "persona_text": persona_text,
@@ -596,6 +599,18 @@ async def _dispatch_tool(
             db.set_bot_persona(bot_id, str(args.get("text", "")))
             return json.dumps({"ok": True}, ensure_ascii=False)
         if name == "add_chat_alias":
+            if not allow_chat_alias_tools:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": "instruction_addressed_to_other_bot",
+                        "hint": (
+                            "В сообщении указан другой бот через @ — add_chat_alias доступен только у того бота, "
+                            "к которому обратились (или без @ ботов в тексте)."
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
             raw_alias = str(args.get("text", ""))
             reason = reject_reason_for_chat_alias(raw_alias)
             if reason:
@@ -610,15 +625,26 @@ async def _dispatch_tool(
                     },
                     ensure_ascii=False,
                 )
-            added = db.add_chat_alias(chat_id, raw_alias)
+            added = db.add_chat_alias(bot_id, chat_id, raw_alias)
             return json.dumps(
-                {"ok": True, "added": added, "aliases": db.list_chat_aliases(chat_id)},
+                {"ok": True, "added": added, "aliases": db.list_chat_aliases(bot_id, chat_id)},
                 ensure_ascii=False,
             )
         if name == "remove_chat_alias":
-            removed = db.remove_chat_alias(chat_id, str(args.get("text", "")))
+            if not allow_chat_alias_tools:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": "instruction_addressed_to_other_bot",
+                        "hint": (
+                            "В сообщении указан другой бот через @ — remove_chat_alias только у адресата."
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
+            removed = db.remove_chat_alias(bot_id, chat_id, str(args.get("text", "")))
             return json.dumps(
-                {"ok": True, "removed": removed, "aliases": db.list_chat_aliases(chat_id)},
+                {"ok": True, "removed": removed, "aliases": db.list_chat_aliases(bot_id, chat_id)},
                 ensure_ascii=False,
             )
     except Exception as e:
@@ -676,8 +702,9 @@ def build_system_prompt(
         "Никогда не пиши имена инструментов, JSON, «complete_turn», «action=…» и подобные пометки — их увидят люди.\n"
         "Просьбы о длине/частоте/тоне фиксируй через set_preference (ключи tone_*, response_depth, verbosity, frequency, "
         "числовые вероятности и т.д.). Ситуационные правила — add_situation_rule. "
-        "Различай: «отзывайтесь на фразу …» (обращение к ботам) — add_chat_alias / remove_chat_alias, без @username людей и "
-        "без логинов в стиле Telegram; «называйте кого-то так-то» — add_long_instruction, не add_chat_alias.\n"
+        "Различай: «отзывайтесь на фразу …» — add_chat_alias / remove_chat_alias (алиас только у этого бота; если в сообщении @ "
+        "другого бота из чата — инструмент недоступен). Без @username людей и без логинов Telegram; «называйте кого-то так-то» — "
+        "add_long_instruction, не add_chat_alias.\n"
     )
 
 
