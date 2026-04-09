@@ -126,6 +126,18 @@ class AppConfig(BaseModel):
     sqlite_path: str = "data/bebro.sqlite"
     """1 — минимум контекста из предпочтений; 5 — максимум. По умолчанию 4."""
     feedback_sensitivity: int = Field(default=4, ge=1, le=5)
+    reply_probability: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=1.0,
+        description="Вероятность вызова LLM на сообщение без @ и без текстового алиаса (decide_engagement).",
+    )
+    reply_to_bot_probability: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=1.0,
+        description="Вероятность вызова LLM на reply к сообщению бота (без явного обращения).",
+    )
     long_memory: LongMemoryPolicy = Field(default_factory=LongMemoryPolicy)
     situation_rules: SituationRulesPolicy = Field(default_factory=SituationRulesPolicy)
     web_search: WebSearchPolicy = Field(default_factory=WebSearchPolicy)

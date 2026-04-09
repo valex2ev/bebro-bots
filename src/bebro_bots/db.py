@@ -18,9 +18,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_CHAT_SETTINGS: dict[str, Any] = {
     "window_messages": 40,
     "recent_for_llm": 16,
-    "reply_probability": 0.15,
     "reaction_probability": 0.12,
-    "reply_to_bot_probability": 0.35,
     "initiative_probability": 0.05,
     "initiative_interval_minutes": 90,
     "proactive_reaction_probability": 0.04,

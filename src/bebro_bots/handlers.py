@@ -350,6 +350,8 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         bot_username=persona.username,
         settings=settings,
         chat_aliases=chat_aliases,
+        reply_probability=float(app_cfg.reply_probability),
+        reply_to_bot_probability=float(app_cfg.reply_to_bot_probability),
     )
     if not eng.call_llm:
         return
