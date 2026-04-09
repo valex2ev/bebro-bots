@@ -4,14 +4,15 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from openai import AsyncOpenAI
 
 from bebro_bots.chat_aliases_policy import reject_reason_for_chat_alias
+from bebro_bots.config import AppConfig, LongMemoryPolicy, SituationRulesPolicy, min_created_at_cutoff
 from bebro_bots.db import Database
 from bebro_bots.telegram_vision import data_url_for_openai
-from bebro_bots.tone_profile import TONE_KEYS, long_memory_limit, situation_rules_limit
+from bebro_bots.tone_profile import TONE_KEYS
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +109,11 @@ def _finalize_turn_result(r: CompleteTurnResult) -> CompleteTurnResult:
     )
 
 
-def _tools_schema(*, include_web_search: bool = False) -> list[dict[str, Any]]:
+def _tools_schema(
+    *,
+    include_web_search: bool = False,
+    web_search_mode: Literal["on_trigger", "always"] = "on_trigger",
+) -> list[dict[str, Any]]:
     tools: list[dict[str, Any]] = [
         {
             "type": "function",
@@ -273,15 +278,21 @@ def _tools_schema(*, include_web_search: bool = False) -> list[dict[str, Any]]:
         },
     ]
     if include_web_search:
+        ws_desc = (
+            "Поиск в интернете (Tavily). Доступен только в этом диалоге: пользователь явно написал ключевое слово. "
+            "Передай сжатый поисковый запрос в query."
+            if web_search_mode == "on_trigger"
+            else (
+                "Поиск в интернете (Tavily). Используй при необходимости свежих или проверяемых сведений из сети; "
+                "не вызывай без пользы. Сжатый запрос в query."
+            )
+        )
         tools.append(
             {
                 "type": "function",
                 "function": {
                     "name": "web_search",
-                    "description": (
-                        "Поиск в интернете (Tavily). Доступен только в этом диалоге: пользователь явно написал ключевое слово. "
-                        "Передай сжатый поисковый запрос в query."
-                    ),
+                    "description": ws_desc,
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -417,6 +428,8 @@ async def run_agent_turn(
     allow_chat_alias_tools: bool = True,
     feedback_sensitivity: int = 4,
     vision_image: tuple[bytes, str] | None = None,
+    app_cfg: AppConfig | None = None,
+    web_search_mode: Literal["on_trigger", "always"] = "on_trigger",
 ) -> CompleteTurnResult:
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
@@ -433,7 +446,10 @@ async def run_agent_turn(
             }
         )
 
-    tools = _tools_schema(include_web_search=allow_web_search)
+    tools = _tools_schema(
+        include_web_search=allow_web_search,
+        web_search_mode=web_search_mode if allow_web_search else "on_trigger",
+    )
 
     for _ in range(8):
         resp = await client.chat.completions.create(
@@ -480,6 +496,7 @@ async def run_agent_turn(
                         allow_mutations=allow_mutations,
                         allow_chat_alias_tools=allow_chat_alias_tools,
                         feedback_sensitivity=feedback_sensitivity,
+                        app_cfg=app_cfg,
                     )
                 messages.append(
                     {
@@ -525,6 +542,7 @@ async def _dispatch_tool(
     allow_mutations: bool = True,
     allow_chat_alias_tools: bool = True,
     feedback_sensitivity: int = 4,
+    app_cfg: AppConfig | None = None,
 ) -> str:
     try:
         if name in MUTATING_TOOL_NAMES and not allow_mutations:
@@ -550,13 +568,23 @@ async def _dispatch_tool(
             )
             return format_tavily_for_tool(res)
         if name == "get_group_state":
+            lm_pol = app_cfg.long_memory if app_cfg else LongMemoryPolicy()
+            sr_pol = app_cfg.situation_rules if app_cfg else SituationRulesPolicy()
             prefs = db.get_settings(bot_id, chat_id)
             mood = db.get_mood(bot_id)
             summary = db.get_summary(bot_id, chat_id)
-            lim = long_memory_limit(feedback_sensitivity)
-            mem = db.list_long_memory(bot_id, chat_id, limit=lim)
-            sr_lim = situation_rules_limit(feedback_sensitivity)
-            rules = db.list_situation_rules(bot_id, chat_id, limit=sr_lim)
+            mem = db.list_long_memory(
+                bot_id,
+                chat_id,
+                limit=lm_pol.context_limit,
+                min_created_at=min_created_at_cutoff(lm_pol.retention_days),
+            )
+            rules = db.list_situation_rules(
+                bot_id,
+                chat_id,
+                limit=sr_pol.context_limit,
+                min_created_at=min_created_at_cutoff(sr_pol.retention_days),
+            )
             persona_text = db.get_bot_persona(bot_id)
             tone_drift = db.get_tone_drift(bot_id)
             rules_payload = [{"trigger": t, "instruction": i} for t, i in rules]
@@ -589,7 +617,13 @@ async def _dispatch_tool(
             merged = db.merge_settings(bot_id, chat_id, patch)
             return json.dumps({"ok": True, "merged_preferences": merged}, ensure_ascii=False)
         if name == "add_long_instruction":
-            db.add_long_memory(bot_id, chat_id, str(args["text"]))
+            lm_pol = app_cfg.long_memory if app_cfg else LongMemoryPolicy()
+            db.add_long_memory(
+                bot_id,
+                chat_id,
+                str(args["text"]),
+                retention_days=lm_pol.retention_days,
+            )
             return json.dumps({"ok": True}, ensure_ascii=False)
         if name == "set_mood":
             db.set_mood(bot_id, str(args["mood"]))
@@ -598,11 +632,14 @@ async def _dispatch_tool(
             db.set_summary(bot_id, chat_id, str(args["summary"]))
             return json.dumps({"ok": True}, ensure_ascii=False)
         if name == "add_situation_rule":
+            sr_pol = app_cfg.situation_rules if app_cfg else SituationRulesPolicy()
             db.add_situation_rule(
                 bot_id,
                 chat_id,
                 trigger_text=str(args.get("trigger_text", "")),
                 instruction_text=str(args.get("instruction_text", "")),
+                max_rows=sr_pol.max_stored,
+                retention_days=sr_pol.retention_days,
             )
             return json.dumps({"ok": True}, ensure_ascii=False)
         if name == "set_bot_persona":
@@ -669,6 +706,7 @@ def build_system_prompt(
     mood: str | None,
     bot_username: str,
     allow_web_search: bool = False,
+    web_search_mode: Literal["on_trigger", "always"] = "on_trigger",
     tone_instructions: str = "",
     situation_block: str = "",
     feedback_sensitivity: int = 4,
@@ -679,14 +717,24 @@ def build_system_prompt(
         "add_situation_rule, set_bot_persona, add_chat_alias, remove_chat_alias"
     )
     if allow_web_search:
-        tools_enum += ", web_search (только в этом ответе — пользователь явно запросил поиск ключевым словом)"
+        if web_search_mode == "always":
+            tools_enum += ", web_search (при необходимости — актуальные сведения из сети)"
+        else:
+            tools_enum += ", web_search (только в этом ответе — пользователь явно запросил поиск ключевым словом)"
     web_extra = ""
     if allow_web_search:
-        web_extra = (
-            "В этом сообщении разрешён поиск в сети: пользователь ввёл ключевое слово-триггер. "
-            "При необходимости один раз вызови web_search с полем query по сути вопроса, затем ответь пользователю "
-            "по найденному. Не вызывай web_search без пользы.\n"
-        )
+        if web_search_mode == "always":
+            web_extra = (
+                "Поиск в сети (Tavily) в этом ходе доступен при необходимости: для свежих фактов, цен, новостей, "
+                "если вопрос требует данных из интернета. Вызови web_search с полем query по сути; не злоупотребляй "
+                "и не вызывай без пользы для ответа пользователю.\n"
+            )
+        else:
+            web_extra = (
+                "В этом сообщении разрешён поиск в сети: пользователь ввёл ключевое слово-триггер. "
+                "При необходимости один раз вызови web_search с полем query по сути вопроса, затем ответь пользователю "
+                "по найденному. Не вызывай web_search без пользы.\n"
+            )
     tone_part = ""
     if tone_instructions.strip():
         tone_part = f"Тон и стиль (оси −1…1 с учётом базы чата и кратковременного сдвига):\n{tone_instructions}\n\n"

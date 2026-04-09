@@ -144,17 +144,6 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_sr_bot_chat
                   ON situation_rules(bot_id, chat_id, updated_at DESC);
-
-                CREATE TABLE IF NOT EXISTS chat_aliases (
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  bot_id TEXT NOT NULL,
-                  chat_id INTEGER NOT NULL,
-                  alias_text TEXT NOT NULL,
-                  created_at REAL NOT NULL,
-                  UNIQUE (bot_id, chat_id, alias_text)
-                );
-                CREATE INDEX IF NOT EXISTS idx_chat_aliases_bot_chat
-                  ON chat_aliases(bot_id, chat_id);
                 """
             )
             self._migrate(conn)
@@ -177,12 +166,32 @@ class Database:
             )
 
     def _migrate_chat_aliases_bot_id(self, conn: sqlite3.Connection) -> None:
-        """Старый формат без bot_id: дублируем каждую строку на каждый bot_id из chat_messages для этого чата."""
-        try:
-            ca_cols = {r[1] for r in conn.execute("PRAGMA table_info(chat_aliases)").fetchall()}
-        except sqlite3.OperationalError:
+        """Создание chat_aliases при первом запуске; миграция старого формата без bot_id."""
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chat_aliases'"
+        ).fetchone()
+        if not exists:
+            conn.execute(
+                """
+                CREATE TABLE chat_aliases (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  bot_id TEXT NOT NULL,
+                  chat_id INTEGER NOT NULL,
+                  alias_text TEXT NOT NULL,
+                  created_at REAL NOT NULL,
+                  UNIQUE (bot_id, chat_id, alias_text)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_chat_aliases_bot_chat ON chat_aliases(bot_id, chat_id)"
+            )
             return
-        if not ca_cols or "bot_id" in ca_cols:
+        ca_cols = {r[1] for r in conn.execute("PRAGMA table_info(chat_aliases)").fetchall()}
+        if "bot_id" in ca_cols:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_chat_aliases_bot_chat ON chat_aliases(bot_id, chat_id)"
+            )
             return
         logger.info("Миграция chat_aliases: добавление bot_id (раздельные алиасы на бота)")
         conn.execute("ALTER TABLE chat_aliases RENAME TO chat_aliases_old")
@@ -393,24 +402,54 @@ class Database:
                 (bot_id, chat_id, summary, now),
             )
 
-    def add_long_memory(self, bot_id: str, chat_id: int, content: str) -> None:
+    def add_long_memory(
+        self,
+        bot_id: str,
+        chat_id: int,
+        content: str,
+        *,
+        retention_days: float | None = None,
+    ) -> None:
         now = time.time()
         with self.connect() as conn:
             conn.execute(
                 "INSERT INTO long_memory (bot_id, chat_id, content, created_at) VALUES (?, ?, ?, ?)",
                 (bot_id, chat_id, content, now),
             )
+            if retention_days is not None:
+                cutoff = now - float(retention_days) * 86400.0
+                conn.execute(
+                    "DELETE FROM long_memory WHERE bot_id=? AND chat_id=? AND created_at < ?",
+                    (bot_id, chat_id, cutoff),
+                )
 
-    def list_long_memory(self, bot_id: str, chat_id: int, limit: int = 50) -> list[str]:
+    def list_long_memory(
+        self,
+        bot_id: str,
+        chat_id: int,
+        limit: int = 50,
+        *,
+        min_created_at: float | None = None,
+    ) -> list[str]:
         with self.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT content FROM long_memory
-                WHERE bot_id=? AND chat_id=?
-                ORDER BY id DESC LIMIT ?
-                """,
-                (bot_id, chat_id, limit),
-            ).fetchall()
+            if min_created_at is None:
+                rows = conn.execute(
+                    """
+                    SELECT content FROM long_memory
+                    WHERE bot_id=? AND chat_id=?
+                    ORDER BY id DESC LIMIT ?
+                    """,
+                    (bot_id, chat_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT content FROM long_memory
+                    WHERE bot_id=? AND chat_id=? AND created_at >= ?
+                    ORDER BY id DESC LIMIT ?
+                    """,
+                    (bot_id, chat_id, min_created_at, limit),
+                ).fetchall()
         return [str(r["content"]) for r in rows]
 
     def remember_sticker(
@@ -559,17 +598,30 @@ class Database:
         bot_id: str,
         chat_id: int,
         limit: int,
+        *,
+        min_created_at: float | None = None,
     ) -> list[tuple[str, str]]:
         with self.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT trigger_text, instruction_text FROM situation_rules
-                WHERE bot_id=? AND chat_id=?
-                ORDER BY updated_at DESC, id DESC
-                LIMIT ?
-                """,
-                (bot_id, chat_id, limit),
-            ).fetchall()
+            if min_created_at is None:
+                rows = conn.execute(
+                    """
+                    SELECT trigger_text, instruction_text FROM situation_rules
+                    WHERE bot_id=? AND chat_id=?
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (bot_id, chat_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT trigger_text, instruction_text FROM situation_rules
+                    WHERE bot_id=? AND chat_id=? AND created_at >= ?
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (bot_id, chat_id, min_created_at, limit),
+                ).fetchall()
         return [(str(r["trigger_text"]), str(r["instruction_text"])) for r in rows]
 
     def add_situation_rule(
@@ -580,6 +632,7 @@ class Database:
         trigger_text: str,
         instruction_text: str,
         max_rows: int = 50,
+        retention_days: float | None = None,
     ) -> None:
         now = time.time()
         trig = trigger_text.strip()
@@ -595,6 +648,12 @@ class Database:
                 """,
                 (bot_id, chat_id, trig, ins, now, now),
             )
+            if retention_days is not None:
+                cutoff = now - float(retention_days) * 86400.0
+                conn.execute(
+                    "DELETE FROM situation_rules WHERE bot_id=? AND chat_id=? AND created_at < ?",
+                    (bot_id, chat_id, cutoff),
+                )
             row = conn.execute(
                 "SELECT COUNT(*) AS c FROM situation_rules WHERE bot_id=? AND chat_id=?",
                 (bot_id, chat_id),

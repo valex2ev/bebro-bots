@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from dotenv import load_dotenv
@@ -34,6 +35,56 @@ class VisionConfig(BaseModel):
 
     enabled: bool = True
     max_image_bytes: int = Field(default=20 * 1024 * 1024, ge=1024 * 100)
+
+
+class LongMemoryPolicy(BaseModel):
+    """Таблица `long_memory`: инструмент `add_long_instruction`."""
+
+    retention_days: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="Удалять записи старше N дней; null — не ограничивать по возрасту.",
+    )
+    context_limit: int = Field(
+        default=12,
+        ge=1,
+        le=500,
+        description="Сколько последних записей учитывать в промпте и в get_group_state.",
+    )
+
+
+class WebSearchPolicy(BaseModel):
+    """Поиск в интернете (Tavily), инструмент `web_search`."""
+
+    mode: Literal["on_trigger", "always"] = Field(
+        default="on_trigger",
+        description=(
+            "on_trigger — инструмент только если в сообщении есть подстрока «найди» (см. triggers). "
+            "always — инструмент доступен в каждом ответе на сообщение группы (не для инициативы/проактивных задач)."
+        ),
+    )
+
+
+class SituationRulesPolicy(BaseModel):
+    """Таблица `situation_rules`: инструмент `add_situation_rule`."""
+
+    retention_days: float | None = Field(
+        default=None,
+        ge=0.0,
+        description="Удалять правила старше N дней; null — не ограничивать по возрасту.",
+    )
+    context_limit: int = Field(
+        default=6,
+        ge=0,
+        le=200,
+        description="Сколько последних правил подмешивать в промпт и get_group_state.",
+    )
+    max_stored: int = Field(
+        default=50,
+        ge=1,
+        le=1000,
+        description="Максимум строк на чат; при превышении удаляются самые старые.",
+    )
 
 
 class VpnWatchConfig(BaseModel):
@@ -75,6 +126,9 @@ class AppConfig(BaseModel):
     sqlite_path: str = "data/bebro.sqlite"
     """1 — минимум контекста из предпочтений; 5 — максимум. По умолчанию 4."""
     feedback_sensitivity: int = Field(default=4, ge=1, le=5)
+    long_memory: LongMemoryPolicy = Field(default_factory=LongMemoryPolicy)
+    situation_rules: SituationRulesPolicy = Field(default_factory=SituationRulesPolicy)
+    web_search: WebSearchPolicy = Field(default_factory=WebSearchPolicy)
     vpn_watch: VpnWatchConfig = Field(default_factory=VpnWatchConfig)
 
     @model_validator(mode="after")
@@ -102,6 +156,13 @@ def _resolve_config_path() -> Path:
     raise FileNotFoundError(
         "Не найден config.yaml. Скопируйте config.example.yaml в config.yaml."
     )
+
+
+def min_created_at_cutoff(retention_days: float | None) -> float | None:
+    """Нижняя граница created_at для выборки «не старше N дней»; None — без фильтра по возрасту."""
+    if retention_days is None:
+        return None
+    return time.time() - float(retention_days) * 86400.0
 
 
 def load_app_config() -> AppConfig:

@@ -83,16 +83,6 @@ def format_tone_lines(merged: dict[str, int]) -> str:
     return "\n".join(parts)
 
 
-def situation_rules_limit(sensitivity: int) -> int:
-    s = max(1, min(5, sensitivity))
-    return {1: 0, 2: 2, 3: 4, 4: 6, 5: 8}[s]
-
-
-def long_memory_limit(sensitivity: int) -> int:
-    s = max(1, min(5, sensitivity))
-    return 4 + s * 2
-
-
 def format_situation_rules_block(rules: list[tuple[str, str]]) -> str:
     if not rules:
         return ""

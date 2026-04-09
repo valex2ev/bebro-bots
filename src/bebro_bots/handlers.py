@@ -12,7 +12,7 @@ from telegram.constants import ChatAction
 from telegram.ext import Application, ContextTypes
 
 from bebro_bots.behavior import decide_engagement
-from bebro_bots.config import AppConfig, BotPersonaConfig
+from bebro_bots.config import AppConfig, BotPersonaConfig, min_created_at_cutoff
 from bebro_bots.db import Database
 from bebro_bots.llm import (
     CompleteTurnResult,
@@ -27,7 +27,6 @@ from bebro_bots.tone_profile import (
     format_situation_rules_block,
     format_tone_lines,
     merged_tone_values,
-    situation_rules_limit,
 )
 from bebro_bots.telegram_vision import download_photo_file_bytes, sniff_image_mime
 from bebro_bots.chat_aliases_policy import chat_alias_mutations_allowed_for_message
@@ -63,15 +62,17 @@ def _compose_prompt_extras(
     bot_id: str,
     chat_id: int,
     settings: dict,
-    feedback_sensitivity: int,
+    app_cfg: AppConfig,
 ) -> tuple[str, str]:
     drift = db.get_tone_drift(bot_id)
     merged = merged_tone_values(settings, drift)
     tone_instructions = format_tone_lines(merged)
+    sr = app_cfg.situation_rules
     rules = db.list_situation_rules(
         bot_id,
         chat_id,
-        limit=situation_rules_limit(feedback_sensitivity),
+        limit=sr.context_limit,
+        min_created_at=min_created_at_cutoff(sr.retention_days),
     )
     situation_block = format_situation_rules_block(rules)
     return tone_instructions, situation_block
@@ -91,7 +92,13 @@ def _format_params_message(
     drift = db.get_tone_drift(bot_id)
     merged = merged_tone_values(settings, drift)
     tone_lines = format_tone_lines(merged)
-    rules = db.list_situation_rules(bot_id, chat_id, limit=20)
+    sr = app_cfg.situation_rules
+    rules = db.list_situation_rules(
+        bot_id,
+        chat_id,
+        limit=min(50, sr.max_stored),
+        min_created_at=min_created_at_cutoff(sr.retention_days),
+    )
     lines: list[str] = [
         f"Бот «{bot_id}», чат {chat_id}",
         f"Восприимчивость к пожеланиям (конфиг): {app_cfg.feedback_sensitivity} из 5",
@@ -350,7 +357,11 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     msg_text = message.text or message.caption or ""
-    allow_web_search = message_allows_web_search(msg_text)
+    ws_mode = app_cfg.web_search.mode
+    if ws_mode == "always":
+        allow_web_search = True
+    else:
+        allow_web_search = message_allows_web_search(msg_text)
     allow_mutations = _allow_learning(message)
     allow_chat_alias_tools = chat_alias_mutations_allowed_for_message(
         msg_text,
@@ -362,13 +373,14 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     mood = db.get_mood(persona.id) or persona.mood_default
     persona_text = db.get_bot_persona(persona.id)
     tone_instructions, situation_block = _compose_prompt_extras(
-        db, persona.id, chat_id, settings, sens,
+        db, persona.id, chat_id, settings, app_cfg,
     )
     system = build_system_prompt(
         personality=persona_text,
         mood=mood,
         bot_username=persona.username,
         allow_web_search=allow_web_search,
+        web_search_mode=ws_mode,
         tone_instructions=tone_instructions,
         situation_block=situation_block,
         feedback_sensitivity=sens,
@@ -416,6 +428,8 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             allow_chat_alias_tools=allow_chat_alias_tools,
             feedback_sensitivity=sens,
             vision_image=vision_image,
+            app_cfg=app_cfg,
+            web_search_mode=ws_mode,
         )
         await _execute_turn_result(
             result=result,
@@ -545,7 +559,7 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     sens = int(app_cfg.feedback_sensitivity)
     persona_text = db.get_bot_persona(persona.id)
     tone_instructions, situation_block = _compose_prompt_extras(
-        db, persona.id, chat_id, settings, sens,
+        db, persona.id, chat_id, settings, app_cfg,
     )
     system = build_system_prompt(
         personality=persona_text,
@@ -574,6 +588,7 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             allow_web_search=False,
             allow_mutations=False,
             feedback_sensitivity=sens,
+            app_cfg=app_cfg,
         )
         if result.action == "reaction":
             result = CompleteTurnResult(
@@ -644,7 +659,7 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     mood = db.get_mood(persona.id) or persona.mood_default
     persona_text = db.get_bot_persona(persona.id)
     tone_instructions, situation_block = _compose_prompt_extras(
-        db, persona.id, chat_id, settings, sens,
+        db, persona.id, chat_id, settings, app_cfg,
     )
     system = build_system_prompt(
         personality=persona_text,
@@ -674,6 +689,7 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             allow_web_search=False,
             allow_mutations=False,
             feedback_sensitivity=sens,
+            app_cfg=app_cfg,
         )
         if result.action == "reaction" and result.reaction_emoji:
             await _execute_turn_result(
