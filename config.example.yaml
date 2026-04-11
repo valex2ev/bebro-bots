@@ -2,7 +2,7 @@
 
 openai:
   api_key_env: OPENAI_API_KEY
-  model: gpt-4o-mini
+  model: gpt-5.4-mini
   base_url: null  # например https://api.openai.com/v1 — по умолчанию клиент OpenAI
 
 server:
@@ -36,17 +36,17 @@ conversation_summary:
 feedback_sensitivity: 4
 
 # Вероятность вызвать LLM без явного @ и без текстового алиаса (0…1). Только из этого файла, не из БД.
-reply_probability: 0.15
+reply_probability: 0.8
 
 # Долгие инструкции (add_long_instruction → таблица long_memory).
 long_memory:
   retention_days: null
-  context_limit: 12
+  context_limit: 25
 
 # Ситуационные правила (add_situation_rule → situation_rules).
 situation_rules:
   retention_days: null
-  context_limit: 6
+  context_limit: 25
   max_stored: 50
 
 web_search:
@@ -61,15 +61,15 @@ allowed_chat_ids: []
 admin_user_ids: []
 
 # У записи бота нет поля personality — текст личности только в БД (см. SPECIFICATION §7).
-#
-# vpn_watch:
-#   enabled: false
-#   check_interval_seconds: 120
-#   reconnect_max_attempts: 5
-#   post_restart_wait_seconds: 15
-#   windows_service_name: "Adguard VPN Service"
-#   service_exe_path: "C:\\Program Files\\AdGuardVpn\\AdGuardVpnSvc.exe"
-#   notify_bot_id: biba
+
+vpn_watch:
+  enabled: false
+  check_interval_seconds: 120
+  reconnect_max_attempts: 5
+  post_restart_wait_seconds: 15
+  windows_service_name: "Adguard VPN Service"
+  service_exe_path: "C:\\Program Files\\AdGuardVpn\\AdGuardVpnSvc.exe"
+  notify_bot_id: biba
 
 bots:
   - id: biba
