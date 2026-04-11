@@ -509,14 +509,9 @@ async def run_agent_turn(
         web_search_mode=web_search_mode if allow_web_search else "on_trigger",
     )
 
+    # Проверку лимита между итерациями не делаем: после первого вызова токены уже учтены,
+    # повторная проверка обрывала цепочку tool_calls до complete_turn.
     for _ in range(8):
-        if app_cfg and record_usage:
-            if not db.input_tokens_below_daily_limit(day, app_cfg.limits.daily_input_tokens):
-                return AgentTurnResult(
-                    CompleteTurnResult(action="none", text=None, reaction_emoji=None, sticker_file_id=None),
-                    blocked_by_input_token_limit=True,
-                )
-
         resp = await client.chat.completions.create(
             model=model,
             messages=messages,

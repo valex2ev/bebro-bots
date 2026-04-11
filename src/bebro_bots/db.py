@@ -808,6 +808,8 @@ class Database:
         return (int(row["input_tokens"]), int(row["web_searches"]))
 
     def input_tokens_below_daily_limit(self, usage_day: str, daily_limit: int) -> bool:
+        if daily_limit <= 0:
+            return True
         used, _ = self.get_global_usage(usage_day)
         return used < daily_limit
 
@@ -826,6 +828,8 @@ class Database:
             )
 
     def web_search_below_daily_limit(self, usage_day: str, daily_limit: int) -> bool:
+        if daily_limit <= 0:
+            return True
         _, used = self.get_global_usage(usage_day)
         return used < daily_limit
 
