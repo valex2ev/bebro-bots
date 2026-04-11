@@ -492,6 +492,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         enabled=vc.enabled,
         max_image_bytes=vc.max_image_bytes,
         max_images=vc.max_images_per_turn,
+        history_photo_policy="if_text_asks",
     )
     if vision_images:
         user_lines.append(
@@ -688,6 +689,7 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         enabled=vc.enabled,
         max_image_bytes=vc.max_image_bytes,
         max_images=vc.max_images_per_turn,
+        history_photo_policy="never",
     )
     if vision_images:
         user_lines.append(
@@ -810,6 +812,7 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         enabled=vc.enabled,
         max_image_bytes=vc.max_image_bytes,
         max_images=1,
+        history_photo_policy="explicit",
     )
     if vision_images:
         user_lines.append(
