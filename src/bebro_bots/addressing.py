@@ -206,3 +206,29 @@ def collect_explicitly_addressed_bot_ids(
     addressed |= _bot_ids_from_entities(message, app_cfg)
     addressed |= _bot_ids_from_aliases(message, app_cfg, db, chat_id)
     return addressed
+
+
+def command_target_bot_username(message: Message) -> str | None:
+    """Username из ``/cmd@bot`` или ``/cmd@@bot`` (берётся последний непустой фрагмент после ``@``).
+
+    ``None`` — в команде не указан конкретный бот (в группе с несколькими ботами ответят все).
+    """
+    text = (message.text or "").strip()
+    if not text:
+        return None
+    first = text.split()[0]
+    if "@" not in first:
+        return None
+    parts = first.split("@")
+    tail = [p for p in parts[1:] if p]
+    if not tail:
+        return None
+    return tail[-1].lower()
+
+
+def command_is_for_this_bot_username(message: Message, bot_username: str) -> bool:
+    """``False``, если в тексте команды указан ``@`` не этот бот; иначе ``True``."""
+    target = command_target_bot_username(message)
+    if target is None:
+        return True
+    return target == bot_username.lstrip("@").lower()

@@ -12,7 +12,10 @@ from telegram import Message, ReactionTypeEmoji, Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, ContextTypes
 
-from bebro_bots.addressing import collect_explicitly_addressed_bot_ids
+from bebro_bots.addressing import (
+    collect_explicitly_addressed_bot_ids,
+    command_is_for_this_bot_username,
+)
 from bebro_bots.behavior import Engagement, decide_stochastic_engagement
 from bebro_bots.config import AppConfig, BotPersonaConfig, min_created_at_cutoff
 from bebro_bots.db import Database, usage_day_utc_string
@@ -563,6 +566,8 @@ async def on_ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     persona: BotPersonaConfig = context.application.bot_data["persona"]
     if not message:
         return
+    if not command_is_for_this_bot_username(message, persona.username):
+        return
     uname = persona.username.lstrip("@")
     await message.reply_text(
         f"ok, бот «{persona.id}», chat_id={message.chat_id}.\n\n"
@@ -583,6 +588,8 @@ async def on_admin_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     db: Database = context.application.bot_data["db"]
     if not message or not user:
         return
+    if not command_is_for_this_bot_username(message, persona.username):
+        return
     if not _is_admin(app_cfg, user.id):
         await message.reply_text("Команда только для администраторов из конфигурации.")
         return
@@ -598,6 +605,8 @@ async def on_bebro_params(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     persona: BotPersonaConfig = context.application.bot_data["persona"]
     db: Database = context.application.bot_data["db"]
     if not message:
+        return
+    if not command_is_for_this_bot_username(message, persona.username):
         return
     chat_id = message.chat_id
     text = _format_params_message(
@@ -619,6 +628,8 @@ async def on_admin_status(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     persona: BotPersonaConfig = context.application.bot_data["persona"]
     db: Database = context.application.bot_data["db"]
     if not message or not user:
+        return
+    if not command_is_for_this_bot_username(message, persona.username):
         return
     if not _is_admin(app_cfg, user.id):
         await message.reply_text("Команда только для администраторов из конфигурации.")
