@@ -12,7 +12,8 @@ from telegram import Message, ReactionTypeEmoji, Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, ContextTypes
 
-from bebro_bots.behavior import decide_engagement
+from bebro_bots.addressing import collect_explicitly_addressed_bot_ids
+from bebro_bots.behavior import Engagement, decide_stochastic_engagement
 from bebro_bots.config import AppConfig, BotPersonaConfig, min_created_at_cutoff
 from bebro_bots.db import Database, usage_day_utc_string
 from bebro_bots.llm import (
@@ -399,13 +400,13 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await _record_incoming(db, persona.id, message)
 
     settings = db.get_settings(persona.id, chat_id)
-    chat_aliases = db.list_chat_aliases(persona.id, chat_id)
-    eng = decide_engagement(
-        message,
-        bot_username=persona.username,
-        chat_aliases=chat_aliases,
-        reply_probability=float(app_cfg.reply_probability),
-    )
+    addressed = collect_explicitly_addressed_bot_ids(message, app_cfg, db, chat_id)
+    if addressed:
+        if persona.id not in addressed:
+            return
+        eng = Engagement(call_llm=True, force_reply=True)
+    else:
+        eng = decide_stochastic_engagement(float(app_cfg.reply_probability))
     if not eng.call_llm:
         return
 
@@ -568,7 +569,9 @@ async def on_ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Если на обычный текст бот не реагирует: @BotFather → ваш бот → "
         "Bot Settings → Group Privacy → Turn off (Disable). "
         "Без этого Telegram не присылает боту сообщения группы.\n\n"
-        f"Без @упоминания ответ случайный (вероятность из config: reply_probability); с @{uname} — ответ обязателен."
+        "Явное обращение: @username (сущности Telegram), текстовый алиас вне кавычек или ответ на сообщение бота — "
+        "откликается только адресат; несколько обращений — все указанные боты. "
+        f"Иначе ответ со случайной вероятностью reply_probability из config."
     )
 
 

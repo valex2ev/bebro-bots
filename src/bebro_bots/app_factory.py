@@ -19,6 +19,7 @@ from bebro_bots.handlers import (
     proactive_reaction_job,
     random_tone_job,
 )
+from bebro_bots.addressing import register_bot_user_id
 from bebro_bots.vpn_watch import vpn_watch_job
 
 if TYPE_CHECKING:
@@ -49,6 +50,8 @@ def build_application(
     token = env_token(persona.token_env)
 
     async def post_init(app: Application) -> None:
+        me = await app.bot.get_me()
+        register_bot_user_id(persona.id, me.id)
         await _preload_sticker_sets(app, persona, db)
         jq = app.job_queue
         if jq:
