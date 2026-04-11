@@ -400,17 +400,17 @@ def _apply_verbosity(patch: dict[str, Any], verbosity: str) -> None:
 
 def _user_message_content(
     user_lines: list[str],
-    vision_image: tuple[bytes, str] | None,
+    vision_images: list[tuple[bytes, str]] | None,
 ) -> str | list[dict[str, Any]]:
     text = "\n".join(user_lines)
-    if not vision_image:
+    imgs = vision_images or []
+    if not imgs:
         return text
-    data, mime = vision_image
-    url = data_url_for_openai(data, mime)
-    return [
-        {"type": "text", "text": text},
-        {"type": "image_url", "image_url": {"url": url}},
-    ]
+    parts: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    for data, mime in imgs:
+        url = data_url_for_openai(data, mime)
+        parts.append({"type": "image_url", "image_url": {"url": url}})
+    return parts
 
 
 async def run_agent_turn(
@@ -427,13 +427,13 @@ async def run_agent_turn(
     allow_mutations: bool = True,
     allow_chat_alias_tools: bool = True,
     feedback_sensitivity: int = 4,
-    vision_image: tuple[bytes, str] | None = None,
+    vision_images: list[tuple[bytes, str]] | None = None,
     app_cfg: AppConfig | None = None,
     web_search_mode: Literal["on_trigger", "always"] = "on_trigger",
 ) -> CompleteTurnResult:
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": _user_message_content(user_lines, vision_image)},
+        {"role": "user", "content": _user_message_content(user_lines, vision_images)},
     ]
     if force_substantive_reply:
         messages.append(

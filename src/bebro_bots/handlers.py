@@ -28,7 +28,7 @@ from bebro_bots.tone_profile import (
     format_tone_lines,
     merged_tone_values,
 )
-from bebro_bots.telegram_vision import download_photo_file_bytes, sniff_image_mime
+from bebro_bots.telegram_vision import collect_vision_images_for_turn
 from bebro_bots.chat_aliases_policy import chat_alias_mutations_allowed_for_message
 from bebro_bots.triggers import message_allows_web_search
 
@@ -397,23 +397,20 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if summary:
         user_lines.insert(1, f"Сжатый контекст (саммари): {summary}")
 
-    vision_image: tuple[bytes, str] | None = None
-    if message.photo and app_cfg.vision.enabled:
-        try:
-            raw = await download_photo_file_bytes(context.bot, message.photo[-1].file_id)
-            if len(raw) > app_cfg.vision.max_image_bytes:
-                logger.warning(
-                    "Фото слишком большое (%s байт), vision пропущен",
-                    len(raw),
-                )
-            else:
-                mime = sniff_image_mime(raw)
-                vision_image = (raw, mime)
-                user_lines.append(
-                    "К последнему сообщению пользователя приложено изображение — опиши или ответь по содержимому."
-                )
-        except Exception:
-            logger.exception("Не удалось загрузить фото для vision")
+    vc = app_cfg.vision
+    vision_images = await collect_vision_images_for_turn(
+        context.bot,
+        message,
+        rows,
+        enabled=vc.enabled,
+        max_image_bytes=vc.max_image_bytes,
+        max_images=vc.max_images_per_turn,
+    )
+    if vision_images:
+        user_lines.append(
+            "К запросу приложены изображения в хронологическом порядке (по сообщениям в чате); "
+            "они соответствуют пометкам [фото] в контексте выше."
+        )
 
     try:
         result = await run_agent_turn(
@@ -429,7 +426,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             allow_mutations=allow_mutations,
             allow_chat_alias_tools=allow_chat_alias_tools,
             feedback_sensitivity=sens,
-            vision_image=vision_image,
+            vision_images=vision_images if vision_images else None,
             app_cfg=app_cfg,
             web_search_mode=ws_mode,
         )
@@ -577,6 +574,19 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         "[инициатива бота] Напиши одно короткое сообщение в группу без прямого обращения: вопрос, шутка или заметка по контексту. Вызови complete_turn с action=message или sticker.",
         *format_recent_for_prompt(rows, len(rows)),
     ]
+    vc = app_cfg.vision
+    vision_images = await collect_vision_images_for_turn(
+        app.bot,
+        None,
+        rows,
+        enabled=vc.enabled,
+        max_image_bytes=vc.max_image_bytes,
+        max_images=vc.max_images_per_turn,
+    )
+    if vision_images:
+        user_lines.append(
+            "К запросу приложены изображения в хронологическом порядке; они соответствуют пометкам [фото] в контексте выше."
+        )
     try:
         result = await run_agent_turn(
             client=client,
@@ -590,6 +600,7 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             allow_web_search=False,
             allow_mutations=False,
             feedback_sensitivity=sens,
+            vision_images=vision_images if vision_images else None,
             app_cfg=app_cfg,
         )
         if result.action == "reaction":
@@ -678,6 +689,19 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         f"message_id={target.message_id}",
         line,
     ]
+    vc = app_cfg.vision
+    vision_images = await collect_vision_images_for_turn(
+        app.bot,
+        None,
+        [target],
+        enabled=vc.enabled,
+        max_image_bytes=vc.max_image_bytes,
+        max_images=1,
+    )
+    if vision_images:
+        user_lines.append(
+            "К указанному сообщению приложено изображение — учти содержимое при выборе emoji."
+        )
     try:
         result = await run_agent_turn(
             client=client,
@@ -691,6 +715,7 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             allow_web_search=False,
             allow_mutations=False,
             feedback_sensitivity=sens,
+            vision_images=vision_images if vision_images else None,
             app_cfg=app_cfg,
         )
         if result.action == "reaction" and result.reaction_emoji:

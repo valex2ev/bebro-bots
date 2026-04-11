@@ -35,6 +35,12 @@ class VisionConfig(BaseModel):
 
     enabled: bool = True
     max_image_bytes: int = Field(default=20 * 1024 * 1024, ge=1024 * 100)
+    max_images_per_turn: int = Field(
+        default=6,
+        ge=1,
+        le=32,
+        description="Максимум изображений в одном запросе к модели (текущее сообщение, reply на фото, фото из окна истории).",
+    )
 
 
 class LongMemoryPolicy(BaseModel):

@@ -44,6 +44,8 @@ web_search:
 vision:
   enabled: true
   max_image_bytes: 20971520
+  # Максимум изображений в одном запросе (текущее сообщение, reply на фото, фото из окна истории).
+  max_images_per_turn: 6
 
 # Пустой список = принимать все чаты. Иначе только перечисленные chat_id (группы).
 allowed_chat_ids: []
