@@ -1,6 +1,7 @@
 .env
 bebro-bots.md
 config.yaml
+config.yaml.*
 config.yml
 data/
 *.sqlite

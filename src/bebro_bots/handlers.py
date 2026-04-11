@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import random
@@ -13,7 +14,7 @@ from telegram.ext import Application, ContextTypes
 
 from bebro_bots.behavior import decide_engagement
 from bebro_bots.config import AppConfig, BotPersonaConfig, min_created_at_cutoff
-from bebro_bots.db import Database
+from bebro_bots.db import Database, usage_day_utc_string
 from bebro_bots.llm import (
     CompleteTurnResult,
     build_system_prompt,
@@ -24,7 +25,6 @@ from bebro_bots.llm import (
 from bebro_bots.tone_profile import (
     MOOD_RANDOM_POOL,
     drift_random_axes,
-    format_situation_rules_block,
     format_tone_lines,
     merged_tone_values,
 )
@@ -67,15 +67,62 @@ def _compose_prompt_extras(
     drift = db.get_tone_drift(bot_id)
     merged = merged_tone_values(settings, drift)
     tone_instructions = format_tone_lines(merged)
+    return tone_instructions, ""
+
+
+def _memory_and_rules_prompt_lines(
+    db: Database,
+    bot_id: str,
+    chat_id: int,
+    app_cfg: AppConfig,
+) -> list[str]:
+    """Явные блоки long_memory и situation_rules в пользовательском промпте (лимиты из YAML)."""
+    lm = app_cfg.long_memory
     sr = app_cfg.situation_rules
+    mem = db.list_long_memory(
+        bot_id,
+        chat_id,
+        limit=lm.context_limit,
+        min_created_at=min_created_at_cutoff(lm.retention_days),
+    )
     rules = db.list_situation_rules(
         bot_id,
         chat_id,
         limit=sr.context_limit,
         min_created_at=min_created_at_cutoff(sr.retention_days),
     )
-    situation_block = format_situation_rules_block(rules)
-    return tone_instructions, situation_block
+    out: list[str] = []
+    if mem:
+        out.append("— Долгие инструкции (long_memory) —")
+        for i, t in enumerate(mem, 1):
+            out.append(f"{i}. {t}")
+    if rules:
+        out.append("— Ситуационные правила —")
+        for t, ins in rules:
+            out.append(f"• когда: {t}")
+            out.append(f"  → {ins}")
+    return out
+
+
+async def _maybe_notify_limit(
+    *,
+    application,
+    chat_id: int,
+    db: Database,
+    app_cfg: AppConfig,
+    kind: str,
+    text: str,
+) -> None:
+    """kind: input_tokens | web_search. Антиспам по limit_notify_cooldown_minutes."""
+    cooldown_sec = float(app_cfg.limit_notify_cooldown_minutes) * 60.0
+    if not db.can_send_limit_notify(chat_id, kind, cooldown_sec):
+        return
+    bot = application.bot
+    try:
+        await bot.send_message(chat_id=chat_id, text=text)
+        db.record_limit_notify(chat_id, kind)
+    except Exception:
+        logger.exception("limit notify failed")
 
 
 def _format_params_message(
@@ -99,9 +146,18 @@ def _format_params_message(
         limit=min(50, sr.max_stored),
         min_created_at=min_created_at_cutoff(sr.retention_days),
     )
+    day = usage_day_utc_string()
+    used_tok, used_ws = db.get_global_usage(day)
+    lim = app_cfg.limits
     lines: list[str] = [
         f"Бот «{bot_id}», чат {chat_id}",
+        f"Модель OpenAI: {app_cfg.openai.model}",
+        f"Web search (режим): {app_cfg.web_search.mode}",
+        f"Сутки учёта лимитов (UTC): {day}",
+        f"Input-токены (потрачено / лимит): {used_tok} / {lim.daily_input_tokens}",
+        f"Web search за сутки (потрачено / лимит): {used_ws} / {lim.daily_web_searches}",
         f"Восприимчивость к пожеланиям (конфиг): {app_cfg.feedback_sensitivity} из 5",
+        f"Вероятность ответа без @ (конфиг): {app_cfg.reply_probability}",
         "",
         "— Персона (БД) —",
         persona_text,
@@ -144,8 +200,10 @@ async def _record_incoming(
     message: Message,
 ) -> None:
     chat_id = message.chat_id
-    uid = message.from_user.id if message.from_user else None
-    uname = message.from_user.username if message.from_user else None
+    u = message.from_user
+    uid = u.id if u else None
+    uname = u.username if u else None
+    role = "assistant" if (u and u.is_bot) else "user"
     if message.sticker:
         db.remember_sticker(
             bot_id,
@@ -160,7 +218,7 @@ async def _record_incoming(
             message_id=message.message_id,
             user_id=uid,
             username=uname,
-            role="user",
+            role=role,
             content=message.caption,
             content_type="sticker",
             sticker_file_id=message.sticker.file_id,
@@ -176,7 +234,7 @@ async def _record_incoming(
             message_id=message.message_id,
             user_id=uid,
             username=uname,
-            role="user",
+            role=role,
             content=cap,
             content_type="photo",
             sticker_file_id=None,
@@ -190,7 +248,7 @@ async def _record_incoming(
         message_id=message.message_id,
         user_id=uid,
         username=uname,
-        role="user",
+        role=role,
         content=text,
         content_type="text",
         sticker_file_id=None,
@@ -340,23 +398,38 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     await _record_incoming(db, persona.id, message)
 
-    bot = context.bot
-    me = await bot.get_me()
     settings = db.get_settings(persona.id, chat_id)
     chat_aliases = db.list_chat_aliases(persona.id, chat_id)
     eng = decide_engagement(
         message,
-        bot_id=me.id,
         bot_username=persona.username,
-        settings=settings,
         chat_aliases=chat_aliases,
         reply_probability=float(app_cfg.reply_probability),
-        reply_to_bot_probability=float(app_cfg.reply_to_bot_probability),
     )
     if not eng.call_llm:
         return
 
-    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    jmin = int(app_cfg.response_jitter_ms_min)
+    jmax = int(app_cfg.response_jitter_ms_max)
+    if jmax > jmin:
+        await asyncio.sleep(random.uniform(jmin, jmax) / 1000.0)
+    elif jmax == jmin and jmin > 0:
+        await asyncio.sleep(jmin / 1000.0)
+
+    recent_n = int(settings.get("recent_for_llm", 16))
+    rows = db.recent_messages(persona.id, chat_id, limit=max(recent_n, 5))
+
+    day = usage_day_utc_string()
+    if not db.input_tokens_below_daily_limit(day, app_cfg.limits.daily_input_tokens):
+        await _maybe_notify_limit(
+            application=context.application,
+            chat_id=chat_id,
+            db=db,
+            app_cfg=app_cfg,
+            kind="input_tokens",
+            text="Дневной лимит запросов к модели исчерпан. Попробуйте позже (лимит обновляется по UTC).",
+        )
+        return
 
     msg_text = message.text or message.caption or ""
     ws_mode = app_cfg.web_search.mode
@@ -364,6 +437,19 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         allow_web_search = True
     else:
         allow_web_search = message_allows_web_search(msg_text)
+    if allow_web_search and not db.web_search_below_daily_limit(day, app_cfg.limits.daily_web_searches):
+        await _maybe_notify_limit(
+            application=context.application,
+            chat_id=chat_id,
+            db=db,
+            app_cfg=app_cfg,
+            kind="web_search",
+            text="Дневной лимит поиска в интернете исчерпан. Повторите завтра (сутки по UTC).",
+        )
+        allow_web_search = False
+
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+
     allow_mutations = _allow_learning(message)
     allow_chat_alias_tools = chat_alias_mutations_allowed_for_message(
         msg_text,
@@ -374,7 +460,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     mood = db.get_mood(persona.id) or persona.mood_default
     persona_text = db.get_bot_persona(persona.id)
-    tone_instructions, situation_block = _compose_prompt_extras(
+    tone_instructions, _sit_unused = _compose_prompt_extras(
         db, persona.id, chat_id, settings, app_cfg,
     )
     system = build_system_prompt(
@@ -384,18 +470,19 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         allow_web_search=allow_web_search,
         web_search_mode=ws_mode,
         tone_instructions=tone_instructions,
-        situation_block=situation_block,
+        situation_block="",
         feedback_sensitivity=sens,
     )
-    recent_n = int(settings.get("recent_for_llm", 16))
-    rows = db.recent_messages(persona.id, chat_id, limit=max(recent_n, 5))
-    user_lines = [
+    user_lines: list[str] = [
         "Контекст последних сообщений (ты — ассистент в этом чате):",
-        *format_recent_for_prompt(rows, recent_n),
     ]
     summary = db.get_summary(persona.id, chat_id)
     if summary:
-        user_lines.insert(1, f"Сжатый контекст (саммари): {summary}")
+        user_lines.append(f"Сжатый контекст (саммари): {summary}")
+    mem_rules = _memory_and_rules_prompt_lines(db, persona.id, chat_id, app_cfg)
+    if mem_rules:
+        user_lines.extend(mem_rules)
+    user_lines.extend(format_recent_for_prompt(rows, recent_n))
 
     vc = app_cfg.vision
     vision_images = await collect_vision_images_for_turn(
@@ -413,7 +500,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
 
     try:
-        result = await run_agent_turn(
+        turn = await run_agent_turn(
             client=client,
             model=model,
             db=db,
@@ -430,8 +517,18 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             app_cfg=app_cfg,
             web_search_mode=ws_mode,
         )
+        if turn.blocked_by_input_token_limit:
+            await _maybe_notify_limit(
+                application=context.application,
+                chat_id=chat_id,
+                db=db,
+                app_cfg=app_cfg,
+                kind="input_tokens",
+                text="Дневной лимит запросов к модели исчерпан. Попробуйте позже (лимит обновляется по UTC).",
+            )
+            return
         await _execute_turn_result(
-            result=result,
+            result=turn.result,
             application=context.application,
             chat_id=chat_id,
             reply_to_message_id=message.message_id,
@@ -442,7 +539,8 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         logger.exception("LLM turn failed")
 
     try:
-        if len(rows) >= 15 and random.random() < 0.06:
+        csum = app_cfg.conversation_summary
+        if len(rows) >= csum.min_messages_in_window and random.random() < csum.random_summarize_probability:
             lines = format_recent_for_prompt(rows, len(rows))
             await maybe_summarize(
                 client=client,
@@ -451,6 +549,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 bot_id=persona.id,
                 chat_id=chat_id,
                 recent_lines=lines,
+                app_cfg=app_cfg,
             )
     except Exception:
         logger.exception("summarize failed")
@@ -468,7 +567,7 @@ async def on_ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Если на обычный текст бот не реагирует: @BotFather → ваш бот → "
         "Bot Settings → Group Privacy → Turn off (Disable). "
         "Без этого Telegram не присылает боту сообщения группы.\n\n"
-        f"Без @упоминания ответ случайный (~15% по умолчанию); с @{uname} — ответ обязателен."
+        f"Без @упоминания ответ случайный (вероятность из config: reply_probability); с @{uname} — ответ обязателен."
     )
 
 
@@ -554,10 +653,14 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     if last and (now - last) < interval:
         return
 
+    day = usage_day_utc_string()
+    if not db.input_tokens_below_daily_limit(day, app_cfg.limits.daily_input_tokens):
+        return
+
     mood = db.get_mood(persona.id) or persona.mood_default
     sens = int(app_cfg.feedback_sensitivity)
     persona_text = db.get_bot_persona(persona.id)
-    tone_instructions, situation_block = _compose_prompt_extras(
+    tone_instructions, _ = _compose_prompt_extras(
         db, persona.id, chat_id, settings, app_cfg,
     )
     system = build_system_prompt(
@@ -566,14 +669,17 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         bot_username=persona.username,
         allow_web_search=False,
         tone_instructions=tone_instructions,
-        situation_block=situation_block,
+        situation_block="",
         feedback_sensitivity=sens,
     )
     rows = db.recent_messages(persona.id, chat_id, limit=int(settings.get("recent_for_llm", 16)))
     user_lines = [
         "[инициатива бота] Напиши одно короткое сообщение в группу без прямого обращения: вопрос, шутка или заметка по контексту. Вызови complete_turn с action=message или sticker.",
-        *format_recent_for_prompt(rows, len(rows)),
     ]
+    mem_rules = _memory_and_rules_prompt_lines(db, persona.id, chat_id, app_cfg)
+    if mem_rules:
+        user_lines.extend(mem_rules)
+    user_lines.extend(format_recent_for_prompt(rows, len(rows)))
     vc = app_cfg.vision
     vision_images = await collect_vision_images_for_turn(
         app.bot,
@@ -588,7 +694,7 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             "К запросу приложены изображения в хронологическом порядке; они соответствуют пометкам [фото] в контексте выше."
         )
     try:
-        result = await run_agent_turn(
+        turn = await run_agent_turn(
             client=client,
             model=model,
             db=db,
@@ -603,6 +709,9 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             vision_images=vision_images if vision_images else None,
             app_cfg=app_cfg,
         )
+        if turn.blocked_by_input_token_limit:
+            return
+        result = turn.result
         if result.action == "reaction":
             result = CompleteTurnResult(
                 action="message",
@@ -640,6 +749,10 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _allowed_chat(app_cfg, chat_id):
         return
 
+    day = usage_day_utc_string()
+    if not db.input_tokens_below_daily_limit(day, app_cfg.limits.daily_input_tokens):
+        return
+
     settings = db.get_settings(persona.id, chat_id)
     sens = max(1, min(5, int(app_cfg.feedback_sensitivity)))
     base_p = float(settings.get("proactive_reaction_probability", 0.04))
@@ -671,7 +784,7 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     mood = db.get_mood(persona.id) or persona.mood_default
     persona_text = db.get_bot_persona(persona.id)
-    tone_instructions, situation_block = _compose_prompt_extras(
+    tone_instructions, _ = _compose_prompt_extras(
         db, persona.id, chat_id, settings, app_cfg,
     )
     system = build_system_prompt(
@@ -680,7 +793,7 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         bot_username=persona.username,
         allow_web_search=False,
         tone_instructions=tone_instructions,
-        situation_block=situation_block,
+        situation_block="",
         feedback_sensitivity=sens,
     )
     user_lines = [
@@ -703,7 +816,7 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             "К указанному сообщению приложено изображение — учти содержимое при выборе emoji."
         )
     try:
-        result = await run_agent_turn(
+        turn = await run_agent_turn(
             client=client,
             model=model,
             db=db,
@@ -718,6 +831,9 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             vision_images=vision_images if vision_images else None,
             app_cfg=app_cfg,
         )
+        if turn.blocked_by_input_token_limit:
+            return
+        result = turn.result
         if result.action == "reaction" and result.reaction_emoji:
             await _execute_turn_result(
                 result=result,

@@ -39,17 +39,13 @@ def _message_text_for_mention(message: Message) -> str | None:
 def decide_engagement(
     message: Message,
     *,
-    bot_id: int,
     bot_username: str,
-    settings: dict,
     chat_aliases: list[str] | None = None,
     reply_probability: float = 0.15,
-    reply_to_bot_probability: float = 0.35,
 ) -> Engagement:
-    """@username — обязательный ответ; текстовый алиас чата (из БД) — то же; иначе — базовая.
+    """@username — обязательный ответ; текстовый алиас чата (из БД) — то же.
 
-    Базовые вероятности задаются в конфиге; при наличии ключей в settings (например после set_preference)
-    используются значения из БД по чату.
+    Иначе одна вероятность ``reply_probability`` из конфига (не из БД).
     """
     combined = _message_text_for_mention(message)
     if combined and _text_has_mention(combined, bot_username):
@@ -58,14 +54,5 @@ def decide_engagement(
     if combined and _text_matches_chat_alias(combined, aliases):
         return Engagement(call_llm=True, force_reply=True)
 
-    reply_to_bot = bool(
-        message.reply_to_message
-        and message.reply_to_message.from_user
-        and message.reply_to_message.from_user.id == bot_id
-    )
-    if reply_to_bot:
-        p = float(settings.get("reply_to_bot_probability", reply_to_bot_probability))
-        return Engagement(call_llm=random.random() < p, force_reply=False)
-
-    p = float(settings.get("reply_probability", reply_probability))
+    p = float(reply_probability)
     return Engagement(call_llm=random.random() < p, force_reply=False)

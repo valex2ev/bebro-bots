@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class OpenAIConfig(BaseModel):
@@ -28,6 +28,33 @@ class BotPersonaConfig(BaseModel):
     username: str
     mood_default: str = "нейтральное"
     sticker_set_names: list[str] = Field(default_factory=list)
+
+
+class LimitsConfig(BaseModel):
+    """Глобальные суточные лимиты (все боты и чаты, один процесс). День — календарный UTC."""
+
+    daily_input_tokens: int = Field(default=500_000, ge=0, description="Prompt-токены OpenAI за сутки (UTC).")
+    daily_web_searches: int = Field(default=30, ge=0, description="Успешные вызовы Tavily за сутки (UTC).")
+    use_utc_calendar_day: bool = Field(
+        default=True,
+        description="Считать сутки по UTC (зафиксировано; локальный пояс не используется).",
+    )
+
+
+class ConversationSummaryPolicy(BaseModel):
+    """Параметры периодического обновления саммари."""
+
+    min_messages_in_window: int = Field(
+        default=15,
+        ge=1,
+        description="Минимум сообщений в окне, чтобы запускать случайное саммари.",
+    )
+    random_summarize_probability: float = Field(
+        default=0.06,
+        ge=0.0,
+        le=1.0,
+        description="Вероятность вызова саммари после ответа бота при достаточном окне.",
+    )
 
 
 class VisionConfig(BaseModel):
@@ -123,9 +150,18 @@ class VpnWatchConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     vision: VisionConfig = Field(default_factory=VisionConfig)
+    limits: LimitsConfig = Field(default_factory=LimitsConfig)
+    """Пауза перед ответом на обычное сообщение группы (мс); снижает одновременные ответы нескольких ботов."""
+    response_jitter_ms_min: int = Field(default=0, ge=0)
+    response_jitter_ms_max: int = Field(default=8000, ge=0)
+    """Не чаще одного уведомления об исчерпании лимита на чат и тип (минуты)."""
+    limit_notify_cooldown_minutes: float = Field(default=45.0, ge=0.5, le=24 * 60.0)
+    conversation_summary: ConversationSummaryPolicy = Field(default_factory=ConversationSummaryPolicy)
     allowed_chat_ids: list[int] = Field(default_factory=list)
     admin_user_ids: list[int] = Field(default_factory=list)
     bots: list[BotPersonaConfig] = Field(default_factory=list)
@@ -136,18 +172,18 @@ class AppConfig(BaseModel):
         default=0.15,
         ge=0.0,
         le=1.0,
-        description="Вероятность вызова LLM на сообщение без @ и без текстового алиаса (decide_engagement).",
-    )
-    reply_to_bot_probability: float = Field(
-        default=0.35,
-        ge=0.0,
-        le=1.0,
-        description="Вероятность вызова LLM на reply к сообщению бота (без явного обращения).",
+        description="Вероятность вызова LLM без @ и без текстового алиаса; только из YAML, не из БД.",
     )
     long_memory: LongMemoryPolicy = Field(default_factory=LongMemoryPolicy)
     situation_rules: SituationRulesPolicy = Field(default_factory=SituationRulesPolicy)
     web_search: WebSearchPolicy = Field(default_factory=WebSearchPolicy)
     vpn_watch: VpnWatchConfig = Field(default_factory=VpnWatchConfig)
+
+    @model_validator(mode="after")
+    def _jitter_order(self) -> AppConfig:
+        if self.response_jitter_ms_max < self.response_jitter_ms_min:
+            raise ValueError("response_jitter_ms_max must be >= response_jitter_ms_min")
+        return self
 
     @model_validator(mode="after")
     def _vpn_notify_bot_in_list(self) -> AppConfig:

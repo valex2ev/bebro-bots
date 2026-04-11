@@ -4,6 +4,7 @@ import json
 import logging
 import sqlite3
 import time
+from datetime import datetime, timezone
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -14,6 +15,15 @@ from bebro_bots.chat_aliases_policy import purge_username_like_aliases, reject_r
 from bebro_bots.tone_profile import DEFAULT_TONE_SETTINGS
 
 logger = logging.getLogger(__name__)
+
+# Не хранить в настройках чата (только из корневого YAML).
+_SETTINGS_STRIP_KEYS = frozenset({"reply_probability", "reply_to_bot_probability"})
+
+
+def usage_day_utc_string() -> str:
+    """Календарный день UTC для глобальных суточных лимитов (YYYY-MM-DD)."""
+    return datetime.now(timezone.utc).date().isoformat()
+
 
 DEFAULT_CHAT_SETTINGS: dict[str, Any] = {
     "window_messages": 40,
@@ -142,6 +152,19 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_sr_bot_chat
                   ON situation_rules(bot_id, chat_id, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS global_usage_daily (
+                  usage_day TEXT PRIMARY KEY,
+                  input_tokens INTEGER NOT NULL DEFAULT 0,
+                  web_searches INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS limit_notify_cooldown (
+                  chat_id INTEGER NOT NULL,
+                  limit_kind TEXT NOT NULL,
+                  last_notified REAL NOT NULL,
+                  PRIMARY KEY (chat_id, limit_kind)
+                );
                 """
             )
             self._migrate(conn)
@@ -280,11 +303,15 @@ class Database:
         if row:
             data = json.loads(row["settings_json"])
             base.update(data)
+        for k in _SETTINGS_STRIP_KEYS:
+            base.pop(k, None)
         return base
 
     def merge_settings(self, bot_id: str, chat_id: int, patch: dict[str, Any]) -> dict[str, Any]:
         cur = self.get_settings(bot_id, chat_id)
         cur.update(patch)
+        for k in _SETTINGS_STRIP_KEYS:
+            cur.pop(k, None)
         with self.connect() as conn:
             conn.execute(
                 """
@@ -449,6 +476,43 @@ class Database:
                     (bot_id, chat_id, min_created_at, limit),
                 ).fetchall()
         return [str(r["content"]) for r in rows]
+
+    def list_long_memory_with_ids(
+        self,
+        bot_id: str,
+        chat_id: int,
+        limit: int = 50,
+        *,
+        min_created_at: float | None = None,
+    ) -> list[tuple[int, str]]:
+        with self.connect() as conn:
+            if min_created_at is None:
+                rows = conn.execute(
+                    """
+                    SELECT id, content FROM long_memory
+                    WHERE bot_id=? AND chat_id=?
+                    ORDER BY id DESC LIMIT ?
+                    """,
+                    (bot_id, chat_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, content FROM long_memory
+                    WHERE bot_id=? AND chat_id=? AND created_at >= ?
+                    ORDER BY id DESC LIMIT ?
+                    """,
+                    (bot_id, chat_id, min_created_at, limit),
+                ).fetchall()
+        return [(int(r["id"]), str(r["content"])) for r in rows]
+
+    def delete_long_memory_by_id(self, bot_id: str, chat_id: int, memory_id: int) -> bool:
+        with self.connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM long_memory WHERE id=? AND bot_id=? AND chat_id=?",
+                (memory_id, bot_id, chat_id),
+            )
+            return cur.rowcount > 0
 
     def remember_sticker(
         self,
@@ -622,6 +686,45 @@ class Database:
                 ).fetchall()
         return [(str(r["trigger_text"]), str(r["instruction_text"])) for r in rows]
 
+    def list_situation_rules_with_ids(
+        self,
+        bot_id: str,
+        chat_id: int,
+        limit: int,
+        *,
+        min_created_at: float | None = None,
+    ) -> list[tuple[int, str, str]]:
+        with self.connect() as conn:
+            if min_created_at is None:
+                rows = conn.execute(
+                    """
+                    SELECT id, trigger_text, instruction_text FROM situation_rules
+                    WHERE bot_id=? AND chat_id=?
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (bot_id, chat_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, trigger_text, instruction_text FROM situation_rules
+                    WHERE bot_id=? AND chat_id=? AND created_at >= ?
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (bot_id, chat_id, min_created_at, limit),
+                ).fetchall()
+        return [(int(r["id"]), str(r["trigger_text"]), str(r["instruction_text"])) for r in rows]
+
+    def delete_situation_rule_by_id(self, bot_id: str, chat_id: int, rule_id: int) -> bool:
+        with self.connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM situation_rules WHERE id=? AND bot_id=? AND chat_id=?",
+                (rule_id, bot_id, chat_id),
+            )
+            return cur.rowcount > 0
+
     def add_situation_rule(
         self,
         bot_id: str,
@@ -692,4 +795,74 @@ class Database:
             conn.execute(
                 "DELETE FROM chat_aliases WHERE bot_id=? AND chat_id=?",
                 (bot_id, chat_id),
+            )
+
+    def get_global_usage(self, usage_day: str) -> tuple[int, int]:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT input_tokens, web_searches FROM global_usage_daily WHERE usage_day=?",
+                (usage_day,),
+            ).fetchone()
+        if not row:
+            return (0, 0)
+        return (int(row["input_tokens"]), int(row["web_searches"]))
+
+    def input_tokens_below_daily_limit(self, usage_day: str, daily_limit: int) -> bool:
+        used, _ = self.get_global_usage(usage_day)
+        return used < daily_limit
+
+    def add_input_tokens(self, usage_day: str, n: int) -> None:
+        if n <= 0:
+            return
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO global_usage_daily (usage_day, input_tokens, web_searches)
+                VALUES (?, ?, 0)
+                ON CONFLICT(usage_day) DO UPDATE SET
+                  input_tokens = global_usage_daily.input_tokens + excluded.input_tokens
+                """,
+                (usage_day, n),
+            )
+
+    def web_search_below_daily_limit(self, usage_day: str, daily_limit: int) -> bool:
+        _, used = self.get_global_usage(usage_day)
+        return used < daily_limit
+
+    def increment_web_search(self, usage_day: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO global_usage_daily (usage_day, input_tokens, web_searches)
+                VALUES (?, 0, 1)
+                ON CONFLICT(usage_day) DO UPDATE SET
+                  web_searches = global_usage_daily.web_searches + 1
+                """,
+                (usage_day,),
+            )
+
+    def can_send_limit_notify(self, chat_id: int, limit_kind: str, cooldown_seconds: float) -> bool:
+        now = time.time()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT last_notified FROM limit_notify_cooldown
+                WHERE chat_id=? AND limit_kind=?
+                """,
+                (chat_id, limit_kind),
+            ).fetchone()
+        if not row:
+            return True
+        return now - float(row["last_notified"]) >= cooldown_seconds
+
+    def record_limit_notify(self, chat_id: int, limit_kind: str) -> None:
+        now = time.time()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO limit_notify_cooldown (chat_id, limit_kind, last_notified)
+                VALUES (?, ?, ?)
+                ON CONFLICT(chat_id, limit_kind) DO UPDATE SET last_notified=excluded.last_notified
+                """,
+                (chat_id, limit_kind, now),
             )

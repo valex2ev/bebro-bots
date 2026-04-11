@@ -10,7 +10,7 @@ from openai import AsyncOpenAI
 
 from bebro_bots.chat_aliases_policy import reject_reason_for_chat_alias
 from bebro_bots.config import AppConfig, LongMemoryPolicy, SituationRulesPolicy, min_created_at_cutoff
-from bebro_bots.db import Database
+from bebro_bots.db import Database, usage_day_utc_string
 from bebro_bots.telegram_vision import data_url_for_openai
 from bebro_bots.tone_profile import TONE_KEYS
 
@@ -19,9 +19,7 @@ logger = logging.getLogger(__name__)
 PREFERENCE_KEYS = {
     "window_messages",
     "recent_for_llm",
-    "reply_probability",
     "reaction_probability",
-    "reply_to_bot_probability",
     "initiative_probability",
     "initiative_interval_minutes",
     "proactive_reaction_probability",
@@ -36,9 +34,11 @@ MUTATING_TOOL_NAMES = frozenset(
     {
         "set_preference",
         "add_long_instruction",
+        "remove_long_instruction",
         "set_mood",
         "update_conversation_summary",
         "add_situation_rule",
+        "remove_situation_rule",
         "set_bot_persona",
         "add_chat_alias",
         "remove_chat_alias",
@@ -52,6 +52,14 @@ class CompleteTurnResult:
     text: str | None
     reaction_emoji: str | None
     sticker_file_id: str | None
+
+
+@dataclass
+class AgentTurnResult:
+    """Результат run_agent_turn: ответ и флаг блокировки по глобальному лимиту input-токенов."""
+
+    result: CompleteTurnResult
+    blocked_by_input_token_limit: bool = False
 
 
 def sanitize_user_visible_text(text: str | None) -> str | None:
@@ -127,7 +135,10 @@ def _tools_schema(
             "type": "function",
             "function": {
                 "name": "set_preference",
-                "description": "Сохранить долговременное предпочтение для этого чата (частота, длина ответов и т.д.).",
+                "description": (
+                    "Сохранить долговременное предпочтение для этого чата (частота, длина ответов и т.д.). "
+                    "Ключи reply_probability и reply_to_bot_probability недоступны — частота ответов задаётся только в config.yaml."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -158,6 +169,27 @@ def _tools_schema(
                     "type": "object",
                     "properties": {"text": {"type": "string"}},
                     "required": ["text"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "remove_long_instruction",
+                "description": (
+                    "Удалить одну долгую инструкцию по id (см. get_group_state: long_instructions)."
+                    "Только по просьбе человека."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "memory_id": {
+                            "type": "integer",
+                            "description": "Числовой id записи long_memory",
+                        }
+                    },
+                    "required": ["memory_id"],
                     "additionalProperties": False,
                 },
             },
@@ -209,6 +241,27 @@ def _tools_schema(
                         },
                     },
                     "required": ["trigger_text", "instruction_text"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "remove_situation_rule",
+                "description": (
+                    "Удалить ситуационное правило по id (см. get_group_state: situation_rules). "
+                    "Только по просьбе человека."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "rule_id": {
+                            "type": "integer",
+                            "description": "Числовой id правила в situation_rules",
+                        }
+                    },
+                    "required": ["rule_id"],
                     "additionalProperties": False,
                 },
             },
@@ -351,9 +404,7 @@ def _parse_pref_value(key: str, raw: str) -> Any:
     }:
         return int(s)
     if key in {
-        "reply_probability",
         "reaction_probability",
-        "reply_to_bot_probability",
         "initiative_probability",
         "short_reply_bias",
         "proactive_reaction_probability",
@@ -381,13 +432,10 @@ def _parse_pref_value(key: str, raw: str) -> Any:
 
 def _apply_frequency_to_probs(patch: dict[str, Any], frequency: str) -> None:
     if frequency == "rare":
-        patch.setdefault("reply_probability", 0.08)
         patch.setdefault("initiative_probability", 0.02)
     elif frequency == "often":
-        patch.setdefault("reply_probability", 0.28)
         patch.setdefault("initiative_probability", 0.12)
     else:
-        patch.setdefault("reply_probability", 0.15)
         patch.setdefault("initiative_probability", 0.05)
 
 
@@ -430,7 +478,17 @@ async def run_agent_turn(
     vision_images: list[tuple[bytes, str]] | None = None,
     app_cfg: AppConfig | None = None,
     web_search_mode: Literal["on_trigger", "always"] = "on_trigger",
-) -> CompleteTurnResult:
+    record_usage: bool = True,
+    usage_day: str | None = None,
+) -> AgentTurnResult:
+    day = usage_day or usage_day_utc_string()
+    if app_cfg and record_usage:
+        if not db.input_tokens_below_daily_limit(day, app_cfg.limits.daily_input_tokens):
+            return AgentTurnResult(
+                CompleteTurnResult(action="none", text=None, reaction_emoji=None, sticker_file_id=None),
+                blocked_by_input_token_limit=True,
+            )
+
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": _user_message_content(user_lines, vision_images)},
@@ -452,6 +510,13 @@ async def run_agent_turn(
     )
 
     for _ in range(8):
+        if app_cfg and record_usage:
+            if not db.input_tokens_below_daily_limit(day, app_cfg.limits.daily_input_tokens):
+                return AgentTurnResult(
+                    CompleteTurnResult(action="none", text=None, reaction_emoji=None, sticker_file_id=None),
+                    blocked_by_input_token_limit=True,
+                )
+
         resp = await client.chat.completions.create(
             model=model,
             messages=messages,
@@ -459,6 +524,12 @@ async def run_agent_turn(
             tool_choice="auto",
             temperature=0.85,
         )
+        if app_cfg and record_usage:
+            u = getattr(resp, "usage", None)
+            pt = getattr(u, "prompt_tokens", None) if u is not None else None
+            if pt is not None:
+                db.add_input_tokens(day, int(pt))
+
         choice = resp.choices[0].message
         if choice.tool_calls:
             messages.append(
@@ -497,6 +568,7 @@ async def run_agent_turn(
                         allow_chat_alias_tools=allow_chat_alias_tools,
                         feedback_sensitivity=feedback_sensitivity,
                         app_cfg=app_cfg,
+                        usage_day=day,
                     )
                 messages.append(
                     {
@@ -506,17 +578,23 @@ async def run_agent_turn(
                     }
                 )
             if complete:
-                return _finalize_turn_result(complete)
+                return AgentTurnResult(_finalize_turn_result(complete), blocked_by_input_token_limit=False)
             continue
 
         text = (choice.content or "").strip()
         if text:
-            return _finalize_turn_result(
-                CompleteTurnResult(action="message", text=text, reaction_emoji=None, sticker_file_id=None)
+            return AgentTurnResult(
+                _finalize_turn_result(
+                    CompleteTurnResult(action="message", text=text, reaction_emoji=None, sticker_file_id=None)
+                ),
+                blocked_by_input_token_limit=False,
             )
         break
 
-    return CompleteTurnResult(action="none", text=None, reaction_emoji=None, sticker_file_id=None)
+    return AgentTurnResult(
+        CompleteTurnResult(action="none", text=None, reaction_emoji=None, sticker_file_id=None),
+        blocked_by_input_token_limit=False,
+    )
 
 
 def _parse_complete_turn(args: dict[str, Any]) -> CompleteTurnResult:
@@ -543,6 +621,7 @@ async def _dispatch_tool(
     allow_chat_alias_tools: bool = True,
     feedback_sensitivity: int = 4,
     app_cfg: AppConfig | None = None,
+    usage_day: str | None = None,
 ) -> str:
     try:
         if name in MUTATING_TOOL_NAMES and not allow_mutations:
@@ -556,6 +635,12 @@ async def _dispatch_tool(
                     {"ok": False, "error": "web_search недоступен в этом запросе"},
                     ensure_ascii=False,
                 )
+            uday = usage_day or usage_day_utc_string()
+            if app_cfg and not db.web_search_below_daily_limit(uday, app_cfg.limits.daily_web_searches):
+                return json.dumps(
+                    {"ok": False, "error": "daily_web_search_limit_exhausted"},
+                    ensure_ascii=False,
+                )
             from bebro_bots.tavily_search import (
                 format_tavily_for_tool,
                 run_tavily_search,
@@ -566,6 +651,8 @@ async def _dispatch_tool(
                 query=str(args.get("query", "")),
                 api_key=tavily_api_key_from_env(),
             )
+            if app_cfg and res.get("ok"):
+                db.increment_web_search(uday)
             return format_tavily_for_tool(res)
         if name == "get_group_state":
             lm_pol = app_cfg.long_memory if app_cfg else LongMemoryPolicy()
@@ -573,21 +660,27 @@ async def _dispatch_tool(
             prefs = db.get_settings(bot_id, chat_id)
             mood = db.get_mood(bot_id)
             summary = db.get_summary(bot_id, chat_id)
-            mem = db.list_long_memory(
+            mem_rows = db.list_long_memory_with_ids(
                 bot_id,
                 chat_id,
                 limit=lm_pol.context_limit,
                 min_created_at=min_created_at_cutoff(lm_pol.retention_days),
             )
-            rules = db.list_situation_rules(
+            mem = [t for _, t in mem_rows]
+            long_with_ids = [{"id": mid, "text": txt} for mid, txt in mem_rows]
+            rules_rows = db.list_situation_rules_with_ids(
                 bot_id,
                 chat_id,
                 limit=sr_pol.context_limit,
                 min_created_at=min_created_at_cutoff(sr_pol.retention_days),
             )
+            rules = [(t, i) for _, t, i in rules_rows]
+            rules_payload = [{"trigger": t, "instruction": i} for t, i in rules]
+            rules_with_ids = [
+                {"id": rid, "trigger": t, "instruction": i} for rid, t, i in rules_rows
+            ]
             persona_text = db.get_bot_persona(bot_id)
             tone_drift = db.get_tone_drift(bot_id)
-            rules_payload = [{"trigger": t, "instruction": i} for t, i in rules]
             chat_aliases = db.list_chat_aliases(bot_id, chat_id)
             return json.dumps(
                 {
@@ -597,7 +690,9 @@ async def _dispatch_tool(
                     "mood": mood,
                     "conversation_summary": summary,
                     "long_instructions": mem,
+                    "long_instructions_with_ids": long_with_ids,
                     "situation_rules": rules_payload,
+                    "situation_rules_with_ids": rules_with_ids,
                     "chat_aliases": chat_aliases,
                     "feedback_sensitivity": feedback_sensitivity,
                 },
@@ -625,6 +720,9 @@ async def _dispatch_tool(
                 retention_days=lm_pol.retention_days,
             )
             return json.dumps({"ok": True}, ensure_ascii=False)
+        if name == "remove_long_instruction":
+            ok = db.delete_long_memory_by_id(bot_id, chat_id, int(args.get("memory_id", 0)))
+            return json.dumps({"ok": ok}, ensure_ascii=False)
         if name == "set_mood":
             db.set_mood(bot_id, str(args["mood"]))
             return json.dumps({"ok": True}, ensure_ascii=False)
@@ -642,6 +740,9 @@ async def _dispatch_tool(
                 retention_days=sr_pol.retention_days,
             )
             return json.dumps({"ok": True}, ensure_ascii=False)
+        if name == "remove_situation_rule":
+            ok = db.delete_situation_rule_by_id(bot_id, chat_id, int(args.get("rule_id", 0)))
+            return json.dumps({"ok": ok}, ensure_ascii=False)
         if name == "set_bot_persona":
             db.set_bot_persona(bot_id, str(args.get("text", "")))
             return json.dumps({"ok": True}, ensure_ascii=False)
@@ -713,8 +814,9 @@ def build_system_prompt(
 ) -> str:
     m = mood or "нейтральное"
     tools_enum = (
-        "get_group_state, set_preference, add_long_instruction, set_mood, update_conversation_summary, "
-        "add_situation_rule, set_bot_persona, add_chat_alias, remove_chat_alias"
+        "get_group_state, set_preference, add_long_instruction, remove_long_instruction, set_mood, "
+        "update_conversation_summary, add_situation_rule, remove_situation_rule, set_bot_persona, "
+        "add_chat_alias, remove_chat_alias"
     )
     if allow_web_search:
         if web_search_mode == "always":
@@ -727,13 +829,14 @@ def build_system_prompt(
             web_extra = (
                 "Поиск в сети (Tavily) в этом ходе доступен при необходимости: для свежих фактов, цен, новостей, "
                 "если вопрос требует данных из интернета. Вызови web_search с полем query по сути; не злоупотребляй "
-                "и не вызывай без пользы для ответа пользователю.\n"
+                "и не вызывай без пользы для ответа пользователю. Опирайся на результаты поиска для проверяемых фактов; "
+                "не требуется оформлять в ответе явные цитаты или ссылки, если об этом не просили.\n"
             )
         else:
             web_extra = (
                 "В этом сообщении разрешён поиск в сети: пользователь ввёл ключевое слово-триггер. "
                 "При необходимости один раз вызови web_search с полем query по сути вопроса, затем ответь пользователю "
-                "по найденному. Не вызывай web_search без пользы.\n"
+                "по найденному. Не вызывай web_search без пользы. Явные цитаты источников в тексте для людей не обязательны.\n"
             )
     tone_part = ""
     if tone_instructions.strip():
@@ -759,7 +862,8 @@ def build_system_prompt(
         "Важно: в поле text у complete_turn и в любом тексте для пользователя — только живая реплика для чата. "
         "Никогда не пиши имена инструментов, JSON, «complete_turn», «action=…» и подобные пометки — их увидят люди.\n"
         "Просьбы о длине/частоте/тоне фиксируй через set_preference (ключи tone_*, response_depth, verbosity, frequency, "
-        "числовые вероятности и т.д.). Ситуационные правила — add_situation_rule. "
+        "числовые вероятности и т.д.; reply_probability только в YAML). Долгие инструкции — add_long_instruction / remove_long_instruction; "
+        "ситуационные правила — add_situation_rule / remove_situation_rule. "
         "Различай: «отзывайтесь на фразу …» — add_chat_alias; «перестань откликаться на …» / «убери алиас …» — remove_chat_alias "
         "с text=фраза (алиас только у этого бота; если в сообщении @ другого бота без обращения к тебе — инструменты недоступны). "
         "Без @username людей и без логинов Telegram; «называйте кого-то так-то» — add_long_instruction, не add_chat_alias.\n"
@@ -770,15 +874,16 @@ def format_recent_for_prompt(rows: list, limit: int) -> list[str]:
     lines: list[str] = []
     for r in rows[-limit:]:
         who = r.username or (str(r.user_id) if r.user_id else "?")
+        is_bot = getattr(r, "role", "user") == "assistant"
+        prefix = f"бот {who}" if is_bot else f"user {who}"
         if r.content_type == "sticker" and r.sticker_file_id:
-            lines.append(f"[{who}] [sticker file_id={r.sticker_file_id}]")
+            lines.append(f"[{prefix}] [sticker file_id={r.sticker_file_id}]")
         elif r.content_type == "photo":
             cap = (r.content or "").strip()
             cap_part = f" подпись: {cap}" if cap else " (без подписи)"
-            lines.append(f"[{who}] [фото]{cap_part}")
+            lines.append(f"[{prefix}] [фото]{cap_part}")
         elif r.content:
-            role = r.role
-            lines.append(f"[{role} {who}] {r.content}")
+            lines.append(f"[{prefix}] {r.content}")
     return lines
 
 
@@ -790,8 +895,12 @@ async def maybe_summarize(
     bot_id: str,
     chat_id: int,
     recent_lines: list[str],
+    app_cfg: AppConfig | None = None,
 ) -> None:
     """Периодическое обновление саммари по последним репликам."""
+    day = usage_day_utc_string()
+    if app_cfg and not db.input_tokens_below_daily_limit(day, app_cfg.limits.daily_input_tokens):
+        return
     prompt = (
         "Сожми следующий фрагмент переписки в краткое саммари на русском (5–10 предложений максимум), "
         "сохрани имена и договорённости:\n\n" + "\n".join(recent_lines[-40:])
@@ -801,6 +910,11 @@ async def maybe_summarize(
         messages=[{"role": "user", "content": prompt}],
         temperature=0.3,
     )
+    if app_cfg:
+        u = getattr(resp, "usage", None)
+        pt = getattr(u, "prompt_tokens", None) if u is not None else None
+        if pt is not None:
+            db.add_input_tokens(day, int(pt))
     text = (resp.choices[0].message.content or "").strip()
     if text:
         db.set_summary(bot_id, chat_id, text)

@@ -14,16 +14,31 @@ server:
 # SQLite одним файлом на всех ботов (путь от корня проекта).
 sqlite_path: data/bebro.sqlite
 
+# Глобальные суточные лимиты (UTC, все боты и чаты вместе). Учёт в SQLite.
+limits:
+  daily_input_tokens: 500000
+  daily_web_searches: 30
+  use_utc_calendar_day: true
+
+# Случайная задержка (мс) перед ответом на обычное сообщение группы — снижает одновременные ответы ботов.
+response_jitter_ms_min: 0
+response_jitter_ms_max: 8000
+
+# Не чаще одного сообщения в чат об исчерпании лимита на тип (минуты).
+limit_notify_cooldown_minutes: 45
+
+# Периодическое саммари после ответа (отдельный вызов модели).
+conversation_summary:
+  min_messages_in_window: 15
+  random_summarize_probability: 0.06
+
 # 1 — мало контекста из предпочтений в промпте; 5 — максимум. По умолчанию 4.
 feedback_sensitivity: 4
 
-# Вероятность вызвать LLM без явного @ и без текстового алиаса (0…1).
+# Вероятность вызвать LLM без явного @ и без текстового алиаса (0…1). Только из этого файла, не из БД.
 reply_probability: 0.15
-# Вероятность вызвать LLM на reply к сообщению бота в тех же условиях.
-reply_to_bot_probability: 0.35
 
 # Долгие инструкции (add_long_instruction → таблица long_memory).
-# retention_days: null — не удалять по возрасту; иначе записи старше N дней удаляются при добавлении.
 long_memory:
   retention_days: null
   context_limit: 12
@@ -34,44 +49,26 @@ situation_rules:
   context_limit: 6
   max_stored: 50
 
-# Поиск в интернете (Tavily, TAVILY_API_KEY в .env).
-# on_trigger — инструмент web_search только если в сообщении есть подстрока «найди» (регистр не важен).
-# always — web_search доступен в каждом ответе на сообщение группы (не в инициативе/проактивных задачах).
 web_search:
   mode: on_trigger
 
-# Передача фото из Telegram в OpenAI (multimodal). Нужна модель с поддержкой image input.
 vision:
   enabled: true
   max_image_bytes: 20971520
-  # Максимум изображений в одном запросе (текущее сообщение, reply на фото, фото из окна истории).
   max_images_per_turn: 6
 
-# Пустой список = принимать все чаты. Иначе только перечисленные chat_id (группы).
 allowed_chat_ids: []
-
-# Telegram user id через запятую в .env ADMIN_USER_IDS — кто может /bebroadmin_*
 admin_user_ids: []
 
 # У записи бота нет поля personality — текст личности только в БД (см. SPECIFICATION §7).
-# Если в старом config.yaml остался personality: — удалите строку.
 #
-# Мониторинг VPN (Windows): проверка Telegram + OpenAI, перезапуск службы AdGuard.
-# Уведомления — во все чаты из chat_messages для выбранного бота (кроме chat_id=0).
 # vpn_watch:
-#   # Включить фоновую проверку и перезапуск службы (только Windows).
 #   enabled: false
-#   # Интервал между проверками канала (секунды, не меньше 30).
 #   check_interval_seconds: 120
-#   # Максимум попыток Restart-Service за один эпизод обрыва.
 #   reconnect_max_attempts: 5
-#   # Пауза после каждого Restart-Service перед повторной проверкой (секунды).
 #   post_restart_wait_seconds: 15
-#   # Имя службы Windows для Restart-Service.
 #   windows_service_name: "Adguard VPN Service"
-#   # Путь к exe — справочно; в коде используется только имя службы.
 #   service_exe_path: "C:\\Program Files\\AdGuardVpn\\AdGuardVpnSvc.exe"
-#   # id бота из bots: задача VPN только у этого экземпляра, уведомления от его токена.
 #   notify_bot_id: biba
 
 bots:
