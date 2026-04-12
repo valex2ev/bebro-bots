@@ -57,9 +57,12 @@ vision:
   max_image_bytes: 20971520
   max_images_per_turn: 6
 
-allowed_chat_ids: []
-# Целые user id и/или username в кавычках: "@yourname". Дополнительно: ADMIN_USER_IDS в .env (только числа).
-admin_user_ids: []
+# chat_id группы (из /bebro_ping). Для супергрупп часто вид -100...
+allowed_chat_ids:
+  - -5295698188
+# Числовой id и/или "@username" в кавычках. Дополнительно: ADMIN_USER_IDS в .env (только числа).
+admin_user_ids:
+  - "@valex2ev"
 
 # У записи бота нет поля personality — текст личности только в БД (см. SPECIFICATION §7).
 
