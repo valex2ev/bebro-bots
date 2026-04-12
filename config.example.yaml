@@ -58,6 +58,7 @@ vision:
   max_images_per_turn: 6
 
 allowed_chat_ids: []
+# Целые user id и/или username в кавычках: "@yourname". Дополнительно: ADMIN_USER_IDS в .env (только числа).
 admin_user_ids: []
 
 # У записи бота нет поля personality — текст личности только в БД (см. SPECIFICATION §7).

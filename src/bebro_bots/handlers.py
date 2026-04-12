@@ -48,10 +48,16 @@ def _allowed_chat(cfg: AppConfig, chat_id: int) -> bool:
     return chat_id in cfg.allowed_chat_ids
 
 
-def _is_admin(cfg: AppConfig, user_id: int | None) -> bool:
+def _is_admin(cfg: AppConfig, user_id: int | None, username: str | None = None) -> bool:
     if user_id is None:
         return False
-    return user_id in cfg.admin_user_ids
+    un = (username or "").strip().lower() or None
+    for entry in cfg.admin_user_ids:
+        if isinstance(entry, int) and entry == user_id:
+            return True
+        if isinstance(entry, str) and un is not None and entry == un:
+            return True
+    return False
 
 
 def _allow_learning(message: Message) -> bool:
@@ -590,7 +596,7 @@ async def on_admin_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     if not command_is_for_this_bot_username(message, persona.username):
         return
-    if not _is_admin(app_cfg, user.id):
+    if not _is_admin(app_cfg, user.id, user.username):
         await message.reply_text("Команда только для администраторов из конфигурации.")
         return
     chat_id = message.chat_id
@@ -631,7 +637,7 @@ async def on_admin_status(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     if not command_is_for_this_bot_username(message, persona.username):
         return
-    if not _is_admin(app_cfg, user.id):
+    if not _is_admin(app_cfg, user.id, user.username):
         await message.reply_text("Команда только для администраторов из конфигурации.")
         return
     chat_id = message.chat_id

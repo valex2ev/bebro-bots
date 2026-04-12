@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class OpenAIConfig(BaseModel):
@@ -163,7 +163,10 @@ class AppConfig(BaseModel):
     limit_notify_cooldown_minutes: float = Field(default=45.0, ge=0.5, le=24 * 60.0)
     conversation_summary: ConversationSummaryPolicy = Field(default_factory=ConversationSummaryPolicy)
     allowed_chat_ids: list[int] = Field(default_factory=list)
-    admin_user_ids: list[int] = Field(default_factory=list)
+    admin_user_ids: list[int | str] = Field(
+        default_factory=list,
+        description="Целые Telegram user id и/или username без @ (строка из YAML в кавычках, напр. \"@valex2ev\").",
+    )
     bots: list[BotPersonaConfig] = Field(default_factory=list)
     sqlite_path: str = "data/bebro.sqlite"
     """1 — минимум контекста из предпочтений; 5 — максимум. По умолчанию 4."""
@@ -178,6 +181,33 @@ class AppConfig(BaseModel):
     situation_rules: SituationRulesPolicy = Field(default_factory=SituationRulesPolicy)
     web_search: WebSearchPolicy = Field(default_factory=WebSearchPolicy)
     vpn_watch: VpnWatchConfig = Field(default_factory=VpnWatchConfig)
+
+    @field_validator("admin_user_ids", mode="before")
+    @classmethod
+    def _normalize_admin_user_ids(cls, v: Any) -> list[int | str]:
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            raise TypeError("admin_user_ids must be a list")
+        out: list[int | str] = []
+        for item in v:
+            if isinstance(item, bool):
+                raise ValueError("admin_user_ids: boolean is not allowed")
+            if isinstance(item, int):
+                out.append(item)
+                continue
+            if isinstance(item, str):
+                s = item.strip()
+                if not s:
+                    continue
+                core = s.lstrip("-")
+                if core.isdigit() and core != "":
+                    out.append(int(s))
+                else:
+                    out.append(s.lstrip("@").lower())
+                continue
+            raise ValueError(f"admin_user_ids: unsupported entry {item!r}")
+        return out
 
     @model_validator(mode="after")
     def _jitter_order(self) -> AppConfig:
