@@ -144,6 +144,7 @@
 | Пункт | Решение |
 |--------|---------|
 | Стек | **Python 3.11+**, `python-telegram-bot` (async / v21+), `openai` (AsyncOpenAI), FastAPI + uvicorn для webhook. |
+| Хвост после джиттера | После паузы — **`messages_after_message_id`** (`message_id` > исходного), блок в промпте + **`rows_for_vision`** для vision; см. §16. |
 | Явные обращения | Модуль **`addressing`**: `collect_explicitly_addressed_bot_ids` — entities, алиасы вне кавычек (`quoted_spans_excluding_content`), reply на бота; при старте **`register_bot_user_id`** после `get_me`. Если множество непустое — отвечают только перечисленные боты; иначе **`decide_stochastic_engagement`**. |
 | Запуск | `python -m bebro_bots` или `python -m bebro_bots polling` — long polling для нескольких ботов в отдельных потоках; `python -m bebro_bots webhook` — один HTTP-порт, пути `/hook/<id>` где `id` — поле `bots[].id` в YAML. |
 | Конфиг | `config.yaml` (локально, не в git; при отсутствии читается `config.example.yaml`). Секреты: `.env`. Путь к БД: `sqlite_path`. **`feedback_sensitivity`**, **`reply_probability`** (только YAML). **`limits`**: `daily_input_tokens`, `daily_web_searches`, `use_utc_calendar_day`. **`response_jitter_ms_min`**, **`response_jitter_ms_max`**, **`limit_notify_cooldown_minutes`**, **`conversation_summary`**. **`long_memory`**, **`situation_rules`**, **`web_search.mode`**, **`vision`** (`max_images_per_turn` и др.). Персона — БД §7. Опционально **`vpn_watch`**. |
@@ -172,6 +173,6 @@
 - Выбранный хвост **подмешивается в пользовательский контекст** для LLM (формат согласовать с **`format_recent_for_prompt`**: не дублировать исходное сообщение без необходимости; избежать лишнего роста токенов — при необходимости лимит строк или объединение с существующим окном **`recent_for_llm`**).
 - Учитываются только сообщения, которые бот **уже успел получить и записать** в **`chat_messages`**. Произвольно «дочитать чат» с серверов Telegram через Bot API **нельзя**; сообщения, не пришедшие в апдейтах, в хвост не попадают.
 
-**Статус:** в коде по состоянию на версию документа ниже — **не реализовано**; реализация — отдельной задачей.
+**Статус:** реализовано — `Database.messages_after_message_id`, раздел промпта после **`rows_base`** (`handlers.on_group_message`), лимит хвоста `min(64, max(recent_for_llm*2, 16))`, vision на объединённом **`rows_for_vision`**.
 
-*Версия документа: §16 постановка хвоста чата; §2 уточнение джиттера (uniform); 2026-04-11.*
+*Версия документа: §16 реализация хвоста; 2026-04-11.*

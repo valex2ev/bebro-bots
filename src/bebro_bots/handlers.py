@@ -48,6 +48,15 @@ def _allowed_chat(cfg: AppConfig, chat_id: int) -> bool:
     return chat_id in cfg.allowed_chat_ids
 
 
+def _merge_message_rows_by_message_id(*parts: list) -> list:
+    """Объединяет строки истории без дубликатов по message_id, по возрастанию message_id."""
+    by_mid: dict[int, object] = {}
+    for part in parts:
+        for r in part:
+            by_mid[int(r.message_id)] = r
+    return sorted(by_mid.values(), key=lambda r: int(r.message_id))
+
+
 def _is_admin(cfg: AppConfig, user_id: int | None, username: str | None = None) -> bool:
     if user_id is None:
         return False
@@ -428,6 +437,11 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     recent_n = int(settings.get("recent_for_llm", 16))
     rows = db.recent_messages(persona.id, chat_id, limit=max(recent_n, 5))
+    trigger_mid = message.message_id
+    tail_limit = min(64, max(recent_n * 2, 16))
+    tail_rows = db.messages_after_message_id(persona.id, chat_id, trigger_mid, tail_limit)
+    rows_base = [r for r in rows if r.message_id <= trigger_mid]
+    rows_for_vision = _merge_message_rows_by_message_id(rows_base, tail_rows)
 
     day = usage_day_utc_string()
     if not db.input_tokens_below_daily_limit(day, app_cfg.limits.daily_input_tokens):
@@ -492,13 +506,18 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     mem_rules = _memory_and_rules_prompt_lines(db, persona.id, chat_id, app_cfg)
     if mem_rules:
         user_lines.extend(mem_rules)
-    user_lines.extend(format_recent_for_prompt(rows, recent_n))
+    user_lines.extend(format_recent_for_prompt(rows_base, recent_n))
+    if tail_rows:
+        user_lines.append(
+            "— Сообщения в чате после исходного (появились до твоего ответа; учти при формулировке) —",
+        )
+        user_lines.extend(format_recent_for_prompt(tail_rows, len(tail_rows)))
 
     vc = app_cfg.vision
     vision_images = await collect_vision_images_for_turn(
         context.bot,
         message,
-        rows,
+        rows_for_vision,
         enabled=vc.enabled,
         max_image_bytes=vc.max_image_bytes,
         max_images=vc.max_images_per_turn,

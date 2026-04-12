@@ -407,6 +407,44 @@ class Database:
             )
         return out
 
+    def messages_after_message_id(
+        self,
+        bot_id: str,
+        chat_id: int,
+        after_message_id: int,
+        limit: int,
+    ) -> list[ChatMessageRow]:
+        """Сообщения с ``message_id`` строго больше ``after_message_id`` (хвост чата в БД этого бота)."""
+        if limit < 1:
+            return []
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT message_id, user_id, username, role, content, content_type, sticker_file_id, photo_file_id, created_at
+                FROM chat_messages
+                WHERE bot_id=? AND chat_id=? AND message_id > ?
+                ORDER BY message_id ASC
+                LIMIT ?
+                """,
+                (bot_id, chat_id, after_message_id, limit),
+            ).fetchall()
+        out: list[ChatMessageRow] = []
+        for r in rows:
+            out.append(
+                ChatMessageRow(
+                    message_id=int(r["message_id"]),
+                    user_id=r["user_id"],
+                    username=r["username"],
+                    role=str(r["role"]),
+                    content=r["content"],
+                    content_type=str(r["content_type"] or "text"),
+                    sticker_file_id=r["sticker_file_id"],
+                    photo_file_id=r["photo_file_id"],
+                    created_at=float(r["created_at"]),
+                )
+            )
+        return out
+
     def get_summary(self, bot_id: str, chat_id: int) -> str | None:
         with self.connect() as conn:
             row = conn.execute(
