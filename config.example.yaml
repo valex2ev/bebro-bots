@@ -16,7 +16,7 @@ sqlite_path: data/bebro.sqlite
 
 # Глобальные суточные лимиты (UTC, все боты и чаты вместе). Учёт в SQLite.
 limits:
-  daily_input_tokens: 500000
+  daily_input_tokens: 650000
   daily_web_searches: 30
   use_utc_calendar_day: true
 
@@ -33,24 +33,24 @@ conversation_summary:
   random_summarize_probability: 0.06
 
 # 1 — мало контекста из предпочтений в промпте; 5 — максимум. По умолчанию 4.
-feedback_sensitivity: 4
+feedback_sensitivity: 5
 
 # Вероятность вызвать LLM без явного @ и без текстового алиаса (0…1). Только из этого файла, не из БД.
 reply_probability: 0.8
 
 # Долгие инструкции (add_long_instruction → таблица long_memory).
 long_memory:
-  retention_days: null
+  retention_days: 90
   context_limit: 25
 
 # Ситуационные правила (add_situation_rule → situation_rules).
 situation_rules:
-  retention_days: null
+  retention_days: 90
   context_limit: 25
   max_stored: 50
 
 web_search:
-  mode: on_trigger
+  mode: always
 
 vision:
   enabled: true
