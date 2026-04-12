@@ -596,10 +596,13 @@ async def on_admin_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     if not command_is_for_this_bot_username(message, persona.username):
         return
+    chat_id = message.chat_id
+    if not _allowed_chat(app_cfg, chat_id):
+        await message.reply_text("Access denied")
+        return
     if not _is_admin(app_cfg, user.id, user.username):
         await message.reply_text("Команда только для администраторов из конфигурации.")
         return
-    chat_id = message.chat_id
     db.clear_chat_memory(persona.id, chat_id)
     await message.reply_text("Память для этого чата очищена.")
 
@@ -637,10 +640,13 @@ async def on_admin_status(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     if not command_is_for_this_bot_username(message, persona.username):
         return
+    chat_id = message.chat_id
+    if not _allowed_chat(app_cfg, chat_id):
+        await message.reply_text("Access denied")
+        return
     if not _is_admin(app_cfg, user.id, user.username):
         await message.reply_text("Команда только для администраторов из конфигурации.")
         return
-    chat_id = message.chat_id
     s = db.get_settings(persona.id, chat_id)
     await message.reply_text(
         f"Бот {persona.id}\nНастройки:\n{json.dumps(s, ensure_ascii=False, indent=2)}",
