@@ -569,12 +569,15 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def on_ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Проверка, что бот видит чат. Команды доставляются даже при включённой group privacy."""
     message = update.effective_message
+    app_cfg: AppConfig = context.application.bot_data["app_cfg"]
     persona: BotPersonaConfig = context.application.bot_data["persona"]
     if not message:
         return
     if not command_is_for_this_bot_username(message, persona.username):
         return
-    uname = persona.username.lstrip("@")
+    if not _allowed_chat(app_cfg, message.chat_id):
+        await message.reply_text("Access denied")
+        return
     await message.reply_text(
         f"ok, бот «{persona.id}», chat_id={message.chat_id}.\n\n"
         "Если на обычный текст бот не реагирует: @BotFather → ваш бот → "
@@ -618,6 +621,9 @@ async def on_bebro_params(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not command_is_for_this_bot_username(message, persona.username):
         return
     chat_id = message.chat_id
+    if not _allowed_chat(app_cfg, chat_id):
+        await message.reply_text("Access denied")
+        return
     text = _format_params_message(
         app_cfg=app_cfg,
         persona=persona,
