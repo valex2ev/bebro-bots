@@ -16,3 +16,4 @@ build/
 bebro-bots prompt.txt.bak
 bebro-restart.cmd
 *.bak
+.claude/
