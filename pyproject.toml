@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["ruff>=0.5.0"]
+dev = ["ruff>=0.5.0", "pytest>=8.0.0"]
 
 [project.scripts]
 bebro-bots = "bebro_bots.main:main"

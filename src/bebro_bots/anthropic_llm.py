@@ -14,6 +14,7 @@ from bebro_bots.llm import (
     CompleteTurnResult,
     _dispatch_tool,
     _finalize_turn_result,
+    _llm_call_with_retry,
     _parse_complete_turn,
     _tools_schema,
 )
@@ -23,8 +24,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Максимум токенов в ответе модели (Anthropic требует явного max_tokens)
-_MAX_OUTPUT_TOKENS = 1024
+# Запасной лимит токенов ответа, если AppConfig недоступен.
+_DEFAULT_MAX_OUTPUT_TOKENS = 2048
 
 
 def _openai_tools_to_anthropic(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -126,15 +127,20 @@ async def run_agent_turn(
     )
     tools = _openai_tools_to_anthropic(openai_tools)
 
+    max_output_tokens = (
+        app_cfg.anthropic.max_output_tokens if app_cfg else _DEFAULT_MAX_OUTPUT_TOKENS
+    )
     for _ in range(8):
-        resp = await client.messages.create(
-            model=model,
-            max_tokens=_MAX_OUTPUT_TOKENS,
-            system=system_prompt,
-            messages=messages,
-            tools=tools,
-            tool_choice={"type": "auto"},
-            temperature=0.85,
+        resp = await _llm_call_with_retry(
+            lambda: client.messages.create(
+                model=model,
+                max_tokens=max_output_tokens,
+                system=system_prompt,
+                messages=messages,
+                tools=tools,
+                tool_choice={"type": "auto"},
+                temperature=0.85,
+            )
         )
         if app_cfg and record_usage:
             pt = getattr(getattr(resp, "usage", None), "input_tokens", None)
@@ -237,11 +243,13 @@ async def maybe_summarize(
         "Сожми следующий фрагмент переписки в краткое саммари на русском (5–10 предложений максимум), "
         "сохрани имена и договорённости:\n\n" + "\n".join(recent_lines[-40:])
     )
-    resp = await client.messages.create(
-        model=model,
-        max_tokens=512,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
+    resp = await _llm_call_with_retry(
+        lambda: client.messages.create(
+            model=model,
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+        )
     )
     if app_cfg:
         pt = getattr(getattr(resp, "usage", None), "input_tokens", None)

@@ -21,6 +21,7 @@ class AnthropicConfig(BaseModel):
     api_key_env: str = "ANTHROPIC_API_KEY"
     model: str = "claude-opus-4-6"
     daily_input_tokens: int = Field(default=300_000, ge=0, description="Input-токены Anthropic за сутки (UTC).")
+    max_output_tokens: int = Field(default=2048, ge=64, description="Максимум токенов в ответе модели (Anthropic требует явного max_tokens).")
 
 
 class ServerConfig(BaseModel):

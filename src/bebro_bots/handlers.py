@@ -16,7 +16,7 @@ from bebro_bots.addressing import (
     command_is_for_this_bot_username,
 )
 from bebro_bots.behavior import Engagement, decide_stochastic_engagement
-from bebro_bots.config import AppConfig, BotPersonaConfig, active_daily_input_tokens, min_created_at_cutoff
+from bebro_bots.config import AppConfig, BotPersonaConfig, active_daily_input_tokens, active_model, min_created_at_cutoff
 from bebro_bots.db import Database, usage_day_utc_string
 from bebro_bots.llm import (
     CompleteTurnResult,
@@ -36,6 +36,12 @@ from bebro_bots.chat_aliases_policy import chat_alias_mutations_allowed_for_mess
 from bebro_bots.triggers import message_allows_web_search
 
 logger = logging.getLogger(__name__)
+
+
+def _ctx_logger(bot_id: str, chat_id: int) -> logging.LoggerAdapter:
+    """Logger с полями bot_id и chat_id в каждой строке."""
+    return logging.LoggerAdapter(logger, {"bot_id": bot_id, "chat_id": chat_id})
+
 
 # Блокировки для последовательных ответов ботов в одном чате.
 # Все экземпляры ботов работают в одном процессе (разные потоки),
@@ -185,10 +191,10 @@ def _format_params_message(
     lim = app_cfg.limits
     lines: list[str] = [
         f"Бот «{bot_id}», чат {chat_id}",
-        f"Модель OpenAI: {app_cfg.openai.model}",
+        f"Провайдер: {app_cfg.provider} / Модель: {active_model(app_cfg)}",
         f"Web search (режим): {app_cfg.web_search.mode}",
         f"Сутки учёта лимитов (UTC): {day}",
-        f"Input-токены (потрачено / лимит): {used_tok} / {lim.daily_input_tokens}",
+        f"Input-токены (потрачено / лимит): {used_tok} / {active_daily_input_tokens(app_cfg)}",
         f"Web search за сутки (потрачено / лимит): {used_ws} / {lim.daily_web_searches}",
         f"Восприимчивость к пожеланиям (конфиг): {app_cfg.feedback_sensitivity} из 5",
         f"Вероятность ответа без @ (конфиг): {app_cfg.reply_probability}",
@@ -594,7 +600,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 bot_id=persona.id,
             )
         except Exception:
-            logger.exception("LLM turn failed")
+            _ctx_logger(persona.id, chat_id).exception("LLM turn failed")
 
         try:
             csum = app_cfg.conversation_summary
@@ -610,7 +616,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     app_cfg=app_cfg,
                 )
         except Exception:
-            logger.exception("summarize failed")
+            _ctx_logger(persona.id, chat_id).exception("summarize failed")
 
     finally:
         chat_lock.release()
@@ -658,6 +664,70 @@ async def on_admin_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     db.clear_chat_memory(persona.id, chat_id)
     await message.reply_text("Память для этого чата очищена.")
+
+
+async def on_admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Выгружает long_memory, situation_rules и chat_aliases текущего чата текстом."""
+    message = update.effective_message
+    user = update.effective_user
+    app_cfg: AppConfig = context.application.bot_data["app_cfg"]
+    persona: BotPersonaConfig = context.application.bot_data["persona"]
+    db: Database = context.application.bot_data["db"]
+    if not message or not user:
+        return
+    if not command_is_for_this_bot_username(message, persona.username):
+        return
+    chat_id = message.chat_id
+    if not _allowed_chat(app_cfg, chat_id):
+        await message.reply_text("Access denied")
+        return
+    if not _is_admin(app_cfg, user.id, user.username):
+        await message.reply_text("Команда только для администраторов из конфигурации.")
+        return
+
+    sr = app_cfg.situation_rules
+    lm = app_cfg.long_memory
+    mem_rows = db.list_long_memory_with_ids(
+        persona.id,
+        chat_id,
+        limit=lm.context_limit,
+        min_created_at=min_created_at_cutoff(lm.retention_days),
+    )
+    rules_rows = db.list_situation_rules_with_ids(
+        persona.id,
+        chat_id,
+        limit=min(200, sr.max_stored),
+        min_created_at=min_created_at_cutoff(sr.retention_days),
+    )
+    aliases = db.list_chat_aliases(persona.id, chat_id)
+
+    lines: list[str] = [f"=== Экспорт: бот «{persona.id}», чат {chat_id} ===", ""]
+    lines.append("--- long_memory ---")
+    if mem_rows:
+        for mid, txt in mem_rows:
+            lines.append(f"[id={mid}] {txt}")
+    else:
+        lines.append("(пусто)")
+    lines.append("")
+    lines.append("--- situation_rules ---")
+    if rules_rows:
+        for rid, trig, ins in rules_rows:
+            lines.append(f"[id={rid}] когда: {trig}")
+            lines.append(f"        → {ins}")
+    else:
+        lines.append("(пусто)")
+    lines.append("")
+    lines.append("--- chat_aliases ---")
+    if aliases:
+        for a in aliases:
+            lines.append(f"• {a}")
+    else:
+        lines.append("(пусто)")
+
+    text = "\n".join(lines)
+    if len(text) > 4090:
+        text = text[:4080] + "\n…(обрезано)"
+    await message.reply_text(text)
 
 
 async def on_bebro_params(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -814,7 +884,7 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         db.set_last_initiative_ts(persona.id, chat_id, now)
     except Exception:
-        logger.exception("initiative failed")
+        _ctx_logger(persona.id, chat_id).exception("initiative failed")
 
 
 async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -931,7 +1001,7 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 bot_id=persona.id,
             )
     except Exception:
-        logger.exception("proactive_reaction failed")
+        _ctx_logger(persona.id, chat_id).exception("proactive_reaction failed")
 
 
 async def random_tone_job(context: ContextTypes.DEFAULT_TYPE) -> None:

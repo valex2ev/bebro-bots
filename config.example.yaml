@@ -16,6 +16,8 @@ anthropic:
   model: claude-opus-4-6
   # Суточный лимит input-токенов Anthropic (UTC, все боты и чаты).
   daily_input_tokens: 300000
+  # Максимум токенов в ответе (Anthropic требует явного max_tokens).
+  max_output_tokens: 2048
 
 server:
   webhook_host: "0.0.0.0"

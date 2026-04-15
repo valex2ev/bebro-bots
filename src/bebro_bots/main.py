@@ -37,8 +37,9 @@ def _run_polling() -> None:
 
 def main() -> None:
     logging.basicConfig(
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        format="%(asctime)s %(levelname)s %(name)s [%(bot_id)s/%(chat_id)s]: %(message)s",
         level=logging.INFO,
+        defaults={"bot_id": "-", "chat_id": "-"},
     )
     parser = argparse.ArgumentParser(description="bebro-bots")
     parser.add_argument(

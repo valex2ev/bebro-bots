@@ -10,6 +10,7 @@ from bebro_bots.config import AppConfig, BotPersonaConfig, active_model, create_
 from bebro_bots.db import Database
 from bebro_bots.handlers import (
     initiative_job,
+    on_admin_export,
     on_admin_reset,
     on_admin_status,
     on_bebro_params,
@@ -117,6 +118,7 @@ def build_application(
     application.add_handler(CommandHandler("bebro_params", on_bebro_params, filters=group))
     application.add_handler(CommandHandler("bebroadmin_reset", on_admin_reset, filters=group))
     application.add_handler(CommandHandler("bebroadmin_status", on_admin_status, filters=group))
+    application.add_handler(CommandHandler("bebroadmin_export", on_admin_export, filters=group))
 
     async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error("Ошибка при обработке update", exc_info=context.error)
