@@ -3,15 +3,15 @@ from __future__ import annotations
 import logging
 import random
 import sys
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
-from openai import AsyncOpenAI
 
-from bebro_bots.config import AppConfig, BotPersonaConfig, env_token
+from bebro_bots.config import AppConfig, BotPersonaConfig, active_model, create_llm_client, env_token
 from bebro_bots.db import Database
 from bebro_bots.handlers import (
     initiative_job,
+    on_admin_export,
     on_admin_reset,
     on_admin_status,
     on_bebro_params,
@@ -46,7 +46,7 @@ def build_application(
     persona: BotPersonaConfig,
     app_cfg: AppConfig,
     db: Database,
-    client: AsyncOpenAI,
+    client: Any,
 ) -> Application:
     token = env_token(persona.token_env)
 
@@ -105,8 +105,8 @@ def build_application(
     application.bot_data["app_cfg"] = app_cfg
     application.bot_data["persona"] = persona
     application.bot_data["db"] = db
-    application.bot_data["openai_client"] = client
-    application.bot_data["model"] = app_cfg.openai.model
+    application.bot_data["llm_client"] = client
+    application.bot_data["model"] = active_model(app_cfg)
     application.bot_data["feedback_sensitivity"] = app_cfg.feedback_sensitivity
     application.bot_data["rng"] = random.Random()
 
@@ -120,6 +120,7 @@ def build_application(
     application.add_handler(CommandHandler("bebro_params", on_bebro_params, filters=group))
     application.add_handler(CommandHandler("bebroadmin_reset", on_admin_reset, filters=group))
     application.add_handler(CommandHandler("bebroadmin_status", on_admin_status, filters=group))
+    application.add_handler(CommandHandler("bebroadmin_export", on_admin_export, filters=group))
 
     async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error("Ошибка при обработке update", exc_info=context.error)

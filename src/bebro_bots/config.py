@@ -14,6 +14,14 @@ class OpenAIConfig(BaseModel):
     api_key_env: str = "OPENAI_API_KEY"
     model: str = "gpt-4o-mini"
     base_url: str | None = None
+    daily_input_tokens: int = Field(default=650_000, ge=0, description="Prompt-токены OpenAI за сутки (UTC).")
+
+
+class AnthropicConfig(BaseModel):
+    api_key_env: str = "ANTHROPIC_API_KEY"
+    model: str = "claude-opus-4-6"
+    daily_input_tokens: int = Field(default=300_000, ge=0, description="Input-токены Anthropic за сутки (UTC).")
+    max_output_tokens: int = Field(default=2048, ge=64, description="Максимум токенов в ответе модели (Anthropic требует явного max_tokens).")
 
 
 class ServerConfig(BaseModel):
@@ -33,7 +41,8 @@ class BotPersonaConfig(BaseModel):
 class LimitsConfig(BaseModel):
     """Глобальные суточные лимиты (все боты и чаты, один процесс). День — календарный UTC."""
 
-    daily_input_tokens: int = Field(default=500_000, ge=0, description="Prompt-токены OpenAI за сутки (UTC).")
+    model_config = ConfigDict(extra="ignore")
+
     daily_web_searches: int = Field(default=30, ge=0, description="Успешные вызовы Tavily за сутки (UTC).")
     use_utc_calendar_day: bool = Field(
         default=True,
@@ -152,7 +161,12 @@ class VpnWatchConfig(BaseModel):
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
+    provider: Literal["openai", "anthropic"] = Field(
+        default="openai",
+        description="Активный LLM-провайдер: openai или anthropic.",
+    )
     openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
+    anthropic: AnthropicConfig = Field(default_factory=AnthropicConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     vision: VisionConfig = Field(default_factory=VisionConfig)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
@@ -276,6 +290,33 @@ def create_openai_client(cfg: AppConfig):
     if cfg.openai.base_url:
         kwargs["base_url"] = cfg.openai.base_url
     return AsyncOpenAI(**kwargs)
+
+
+def create_anthropic_client(cfg: AppConfig):
+    from anthropic import AsyncAnthropic
+
+    return AsyncAnthropic(api_key=env_token(cfg.anthropic.api_key_env))
+
+
+def create_llm_client(cfg: AppConfig):
+    """Создать клиент активного провайдера (AsyncOpenAI или AsyncAnthropic)."""
+    if cfg.provider == "anthropic":
+        return create_anthropic_client(cfg)
+    return create_openai_client(cfg)
+
+
+def active_model(cfg: AppConfig) -> str:
+    """Модель активного провайдера."""
+    if cfg.provider == "anthropic":
+        return cfg.anthropic.model
+    return cfg.openai.model
+
+
+def active_daily_input_tokens(cfg: AppConfig) -> int:
+    """Суточный лимит input-токенов активного провайдера."""
+    if cfg.provider == "anthropic":
+        return cfg.anthropic.daily_input_tokens
+    return cfg.openai.daily_input_tokens
 
 
 def env_token(token_env: str) -> str:

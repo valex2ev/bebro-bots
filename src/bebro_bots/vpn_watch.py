@@ -1,4 +1,4 @@
-"""Периодическая проверка канала Telegram + OpenAI и перезапуск VPN (служба Windows)."""
+"""Периодическая проверка канала Telegram + LLM API и перезапуск VPN (служба Windows)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ import sys
 import time
 from typing import Any
 
-from openai import AsyncOpenAI
 from telegram.ext import ContextTypes
 
 from bebro_bots.config import AppConfig
@@ -21,19 +20,28 @@ PROBE_TIMEOUT = 20.0
 RESTART_TIMEOUT = 120
 
 
-async def probe_connectivity(bot: Any, client: AsyncOpenAI) -> bool:
-    """Успех только если доступны и Telegram Bot API, и OpenAI API."""
+async def _probe_llm_api(client: Any, provider: str) -> bool:
+    """Проверка доступности LLM API в зависимости от провайдера."""
+    try:
+        if provider == "anthropic":
+            # Минимальный запрос к Anthropic — список моделей
+            await asyncio.wait_for(client.models.list(), timeout=PROBE_TIMEOUT)
+        else:
+            await asyncio.wait_for(client.models.list(), timeout=PROBE_TIMEOUT)
+        return True
+    except Exception:
+        logger.warning("VPN watch: проверка %s API не удалась", provider, exc_info=True)
+        return False
+
+
+async def probe_connectivity(bot: Any, client: Any, provider: str = "openai") -> bool:
+    """Успех только если доступны и Telegram Bot API, и LLM API."""
     try:
         await asyncio.wait_for(bot.get_me(), timeout=PROBE_TIMEOUT)
     except Exception:
         logger.warning("VPN watch: проверка Telegram не удалась", exc_info=True)
         return False
-    try:
-        await asyncio.wait_for(client.models.list(), timeout=PROBE_TIMEOUT)
-    except Exception:
-        logger.warning("VPN watch: проверка OpenAI не удалась", exc_info=True)
-        return False
-    return True
+    return await _probe_llm_api(client, provider)
 
 
 def _restart_windows_service_sync(service_name: str) -> None:
@@ -100,7 +108,7 @@ async def vpn_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     if persona.id != vw.notify_bot_id:
         return
 
-    client: AsyncOpenAI = app.bot_data["openai_client"]
+    client = app.bot_data["llm_client"]
     bot = app.bot
     db: Database = app.bot_data["db"]
 
@@ -109,7 +117,7 @@ async def vpn_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         {"failure_detected_at": None, "failure_notified": False},
     )
 
-    ok = await probe_connectivity(bot, client)
+    ok = await probe_connectivity(bot, client, provider=cfg.provider)
     if ok:
         state["failure_detected_at"] = None
         state["failure_notified"] = False
@@ -138,7 +146,7 @@ async def vpn_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         await asyncio.sleep(vw.post_restart_wait_seconds)
 
-        if await probe_connectivity(bot, client):
+        if await probe_connectivity(bot, client, provider=cfg.provider):
             recovery_ts = time.time()
             text = (
                 "VPN: соединение восстановлено.\n"

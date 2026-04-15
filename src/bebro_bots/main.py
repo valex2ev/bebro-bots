@@ -8,14 +8,14 @@ import sys
 from telegram import Update
 
 from bebro_bots.app_factory import build_application
-from bebro_bots.config import create_openai_client, load_app_config
+from bebro_bots.config import create_llm_client, load_app_config
 from bebro_bots.db import Database
 
 
 def _run_polling() -> None:
     cfg = load_app_config()
     db = Database(cfg.sqlite_path)
-    client = create_openai_client(cfg)
+    client = create_llm_client(cfg)
     if not cfg.bots:
         raise SystemExit("В config.yaml нет ботов (ключ bots).")
 
@@ -37,8 +37,9 @@ def _run_polling() -> None:
 
 def main() -> None:
     logging.basicConfig(
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        format="%(asctime)s %(levelname)s %(name)s [%(bot_id)s/%(chat_id)s]: %(message)s",
         level=logging.INFO,
+        defaults={"bot_id": "-", "chat_id": "-"},
     )
     parser = argparse.ArgumentParser(description="bebro-bots")
     parser.add_argument(

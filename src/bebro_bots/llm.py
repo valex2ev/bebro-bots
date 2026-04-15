@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -8,42 +9,32 @@ from typing import Any, Literal
 
 from openai import AsyncOpenAI
 
-from bebro_bots.chat_aliases_policy import reject_reason_for_chat_alias
-from bebro_bots.config import AppConfig, LongMemoryPolicy, SituationRulesPolicy, min_created_at_cutoff
+from bebro_bots.config import AppConfig
 from bebro_bots.db import Database, usage_day_utc_string
 from bebro_bots.telegram_vision import data_url_for_openai
-from bebro_bots.tone_profile import TONE_KEYS
+from bebro_bots.tool_definitions import _tools_schema  # noqa: F401  (re-exported for anthropic_llm)
+from bebro_bots.tool_dispatch import _dispatch_tool  # noqa: F401  (re-exported for anthropic_llm)
 
 logger = logging.getLogger(__name__)
 
-PREFERENCE_KEYS = {
-    "window_messages",
-    "recent_for_llm",
-    "reaction_probability",
-    "initiative_probability",
-    "initiative_interval_minutes",
-    "proactive_reaction_probability",
-    "verbosity",
-    "frequency",
-    "short_reply_bias",
-    "response_depth",
-    *TONE_KEYS,
-}
+_LLM_RETRY_DELAYS = (1.0, 2.0, 4.0)  # секунды между попытками (3 retry = 4 попытки итого)
 
-MUTATING_TOOL_NAMES = frozenset(
-    {
-        "set_preference",
-        "add_long_instruction",
-        "remove_long_instruction",
-        "set_mood",
-        "update_conversation_summary",
-        "add_situation_rule",
-        "remove_situation_rule",
-        "set_bot_persona",
-        "add_chat_alias",
-        "remove_chat_alias",
-    }
-)
+
+async def _llm_call_with_retry(coro_fn, delays: tuple = _LLM_RETRY_DELAYS):
+    """Выполняет coroutine-функцию coro_fn() с exponential backoff при временных сбоях.
+
+    coro_fn — callable без аргументов, возвращающий coroutine (вызывается заново на каждую попытку).
+    """
+    last_exc: BaseException | None = None
+    for attempt, delay in enumerate((-1.0, *delays)):
+        if attempt > 0:
+            logger.warning("LLM call retry %d/%d after %.0fs (prev error: %s)", attempt, len(delays), delay, last_exc)
+            await asyncio.sleep(delay)
+        try:
+            return await coro_fn()
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+    raise last_exc  # type: ignore[misc]
 
 
 @dataclass
@@ -117,333 +108,16 @@ def _finalize_turn_result(r: CompleteTurnResult) -> CompleteTurnResult:
     )
 
 
-def _tools_schema(
-    *,
-    include_web_search: bool = False,
-    web_search_mode: Literal["on_trigger", "always"] = "on_trigger",
-) -> list[dict[str, Any]]:
-    tools: list[dict[str, Any]] = [
-        {
-            "type": "function",
-            "function": {
-                "name": "get_group_state",
-                "description": "Прочитать настроения, предпочтения, краткую память и саммари беседы по текущему чату.",
-                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "set_preference",
-                "description": (
-                    "Сохранить долговременное предпочтение для этого чата (частота, длина ответов и т.д.). "
-                    "Ключи reply_probability и reply_to_bot_probability недоступны — частота ответов задаётся только в config.yaml."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "key": {
-                            "type": "string",
-                            "enum": sorted(PREFERENCE_KEYS),
-                        },
-                        "value": {
-                            "type": "string",
-                            "description": "Число как строка, или short|medium|long для verbosity, rare|medium|often для frequency",
-                        },
-                    },
-                    "required": ["key", "value"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "add_long_instruction",
-                "description": (
-                    "Добавить долгую инструкцию для поведения в чате: в т.ч. как называть участников, "
-                    "прозвища, кто как к кому обращается. Не использовать для триггеров «откликайтесь на слово» — "
-                    "под это add_chat_alias."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {"text": {"type": "string"}},
-                    "required": ["text"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "remove_long_instruction",
-                "description": (
-                    "Удалить одну долгую инструкцию по id (см. get_group_state: long_instructions)."
-                    "Только по просьбе человека."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "memory_id": {
-                            "type": "integer",
-                            "description": "Числовой id записи long_memory",
-                        }
-                    },
-                    "required": ["memory_id"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "set_mood",
-                "description": "Обновить текущее настроение бота (короткая строка).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"mood": {"type": "string"}},
-                    "required": ["mood"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "update_conversation_summary",
-                "description": "Обновить сжатый контекст беседы (саммари) для экономии токенов.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"summary": {"type": "string"}},
-                    "required": ["summary"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "add_situation_rule",
-                "description": (
-                    "Сохранить правило: в какой ситуации (trigger) как себя вести (instruction). "
-                    "Только если просит человек (не другой бот)."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "trigger_text": {
-                            "type": "string",
-                            "description": "Кратко: когда применять (тема, настроение чата, тип сообщения)",
-                        },
-                        "instruction_text": {
-                            "type": "string",
-                            "description": "Что делать в таких случаях (1–2 предложения)",
-                        },
-                    },
-                    "required": ["trigger_text", "instruction_text"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "remove_situation_rule",
-                "description": (
-                    "Удалить ситуационное правило по id (см. get_group_state: situation_rules). "
-                    "Только по просьбе человека."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "rule_id": {
-                            "type": "integer",
-                            "description": "Числовой id правила в situation_rules",
-                        }
-                    },
-                    "required": ["rule_id"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "set_bot_persona",
-                "description": (
-                    "Обновить базовое текстовое описание личности бота (глобально для всех чатов). "
-                    "Только по просьбе человека."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {"text": {"type": "string"}},
-                    "required": ["text"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "add_chat_alias",
-                "description": (
-                    "Только если люди просят, чтобы этот бот откликался на фразу (алиас хранится на этого бота в чате). "
-                    "Если в сообщении указан другой бот через @ — инструмент недоступен (кроме случая, когда обращаются к тебе). "
-                    "Не для «называйте пользователя X так-то» — add_long_instruction. "
-                    "Нельзя: @username людей, строки-логины Telegram (ASCII). "
-                    "Подстрока в тексте — отклик как при @username только у ботов, у которых сохранён этот алиас."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "text": {
-                            "type": "string",
-                            "description": "Подстрока-триггер (без @ и без логинов Telegram)",
-                        }
-                    },
-                    "required": ["text"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "remove_chat_alias",
-                "description": (
-                    "Удалить сохранённый у этого бота текстовый триггер (алиас) в чате. "
-                    "Используй, когда человек просит перестать откликаться на фразу: например «перестань откликаться на …», "
-                    "«убери алиас …», «забудь триггер …». В поле text передай саму подстроку-триггер (как в списке алиасов, "
-                    "без лишних слов). Те же ограничения, что у add_chat_alias (не @ другого бота без обращения к тебе)."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "text": {
-                            "type": "string",
-                            "description": "Подстрока-триггер для удаления (как сохраняли)",
-                        }
-                    },
-                    "required": ["text"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-    ]
-    if include_web_search:
-        ws_desc = (
-            "Поиск в интернете (Tavily). Доступен только в этом диалоге: пользователь явно написал ключевое слово. "
-            "Передай сжатый поисковый запрос в query."
-            if web_search_mode == "on_trigger"
-            else (
-                "Поиск в интернете (Tavily). Используй при необходимости свежих или проверяемых сведений из сети; "
-                "не вызывай без пользы. Сжатый запрос в query."
-            )
-        )
-        tools.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": "web_search",
-                    "description": ws_desc,
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "Запрос для поиска (суть вопроса без служебных слов)",
-                            },
-                        },
-                        "required": ["query"],
-                        "additionalProperties": False,
-                    },
-                },
-            }
-        )
-    tools.append(
-        {
-            "type": "function",
-            "function": {
-                "name": "complete_turn",
-                "description": "Завершить ход одним вызовом. Не дублируй это описание в поле text.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "action": {
-                            "type": "string",
-                            "enum": ["message", "reaction", "sticker", "none"],
-                        },
-                        "text": {
-                            "type": "string",
-                            "description": "Только текст/emoji для людей в чате. Без имён инструментов, без JSON и без фраз вроде complete_turn.",
-                        },
-                        "reaction_emoji": {
-                            "type": "string",
-                            "description": "Одна emoji для реакции на сообщение пользователя",
-                        },
-                        "sticker_file_id": {
-                            "type": "string",
-                            "description": "file_id стикера или пусто для случайного из пула чата",
-                        },
-                    },
-                    "required": ["action"],
-                    "additionalProperties": False,
-                },
-            },
-        }
+def _parse_complete_turn(args: dict[str, Any]) -> CompleteTurnResult:
+    raw_text = args.get("text")
+    if isinstance(raw_text, str):
+        raw_text = sanitize_user_visible_text(raw_text)
+    return CompleteTurnResult(
+        action=str(args.get("action") or "none"),
+        text=raw_text,
+        reaction_emoji=args.get("reaction_emoji"),
+        sticker_file_id=args.get("sticker_file_id") or None,
     )
-    return tools
-
-
-def _parse_pref_value(key: str, raw: str) -> Any:
-    s = raw.strip()
-    if key in {
-        "window_messages",
-        "recent_for_llm",
-        "initiative_interval_minutes",
-    }:
-        return int(s)
-    if key in {
-        "reaction_probability",
-        "initiative_probability",
-        "short_reply_bias",
-        "proactive_reaction_probability",
-    }:
-        return float(s)
-    if key in TONE_KEYS:
-        v = int(s)
-        if v not in (-1, 0, 1):
-            raise ValueError("ось тона: -1, 0 или 1")
-        return v
-    if key == "verbosity":
-        if s not in ("short", "medium", "long"):
-            raise ValueError("verbosity: short|medium|long")
-        return s
-    if key == "frequency":
-        if s not in ("rare", "medium", "often"):
-            raise ValueError("frequency: rare|medium|often")
-        return s
-    if key == "response_depth":
-        if s not in ("shallow", "normal", "deep"):
-            raise ValueError("response_depth: shallow|normal|deep")
-        return s
-    raise ValueError(f"неизвестный ключ {key}")
-
-
-def _apply_frequency_to_probs(patch: dict[str, Any], frequency: str) -> None:
-    if frequency == "rare":
-        patch.setdefault("initiative_probability", 0.02)
-    elif frequency == "often":
-        patch.setdefault("initiative_probability", 0.12)
-    else:
-        patch.setdefault("initiative_probability", 0.05)
-
-
-def _apply_verbosity(patch: dict[str, Any], verbosity: str) -> None:
-    if verbosity == "short":
-        patch["short_reply_bias"] = min(1.0, float(patch.get("short_reply_bias", 0.0)) + 0.3)
-    elif verbosity == "long":
-        patch["short_reply_bias"] = max(-1.0, float(patch.get("short_reply_bias", 0.0)) - 0.3)
 
 
 def _user_message_content(
@@ -512,12 +186,14 @@ async def run_agent_turn(
     # Проверку лимита между итерациями не делаем: после первого вызова токены уже учтены,
     # повторная проверка обрывала цепочку tool_calls до complete_turn.
     for _ in range(8):
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
-            temperature=0.85,
+        resp = await _llm_call_with_retry(
+            lambda: client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                temperature=0.85,
+            )
         )
         if app_cfg and record_usage:
             u = getattr(resp, "usage", None)
@@ -590,210 +266,6 @@ async def run_agent_turn(
         CompleteTurnResult(action="none", text=None, reaction_emoji=None, sticker_file_id=None),
         blocked_by_input_token_limit=False,
     )
-
-
-def _parse_complete_turn(args: dict[str, Any]) -> CompleteTurnResult:
-    raw_text = args.get("text")
-    if isinstance(raw_text, str):
-        raw_text = sanitize_user_visible_text(raw_text)
-    return CompleteTurnResult(
-        action=str(args.get("action") or "none"),
-        text=raw_text,
-        reaction_emoji=args.get("reaction_emoji"),
-        sticker_file_id=args.get("sticker_file_id") or None,
-    )
-
-
-async def _dispatch_tool(
-    *,
-    name: str,
-    args: dict[str, Any],
-    db: Database,
-    bot_id: str,
-    chat_id: int,
-    allow_web_search: bool = False,
-    allow_mutations: bool = True,
-    allow_chat_alias_tools: bool = True,
-    feedback_sensitivity: int = 4,
-    app_cfg: AppConfig | None = None,
-    usage_day: str | None = None,
-) -> str:
-    try:
-        if name in MUTATING_TOOL_NAMES and not allow_mutations:
-            return json.dumps(
-                {"ok": False, "error": "настройки по сообщениям от ботов не меняются"},
-                ensure_ascii=False,
-            )
-        if name == "web_search":
-            if not allow_web_search:
-                return json.dumps(
-                    {"ok": False, "error": "web_search недоступен в этом запросе"},
-                    ensure_ascii=False,
-                )
-            uday = usage_day or usage_day_utc_string()
-            if app_cfg and not db.web_search_below_daily_limit(uday, app_cfg.limits.daily_web_searches):
-                return json.dumps(
-                    {"ok": False, "error": "daily_web_search_limit_exhausted"},
-                    ensure_ascii=False,
-                )
-            from bebro_bots.tavily_search import (
-                format_tavily_for_tool,
-                run_tavily_search,
-                tavily_api_key_from_env,
-            )
-
-            res = await run_tavily_search(
-                query=str(args.get("query", "")),
-                api_key=tavily_api_key_from_env(),
-            )
-            if app_cfg and res.get("ok"):
-                db.increment_web_search(uday)
-            return format_tavily_for_tool(res)
-        if name == "get_group_state":
-            lm_pol = app_cfg.long_memory if app_cfg else LongMemoryPolicy()
-            sr_pol = app_cfg.situation_rules if app_cfg else SituationRulesPolicy()
-            prefs = db.get_settings(bot_id, chat_id)
-            mood = db.get_mood(bot_id)
-            summary = db.get_summary(bot_id, chat_id)
-            mem_rows = db.list_long_memory_with_ids(
-                bot_id,
-                chat_id,
-                limit=lm_pol.context_limit,
-                min_created_at=min_created_at_cutoff(lm_pol.retention_days),
-            )
-            mem = [t for _, t in mem_rows]
-            long_with_ids = [{"id": mid, "text": txt} for mid, txt in mem_rows]
-            rules_rows = db.list_situation_rules_with_ids(
-                bot_id,
-                chat_id,
-                limit=sr_pol.context_limit,
-                min_created_at=min_created_at_cutoff(sr_pol.retention_days),
-            )
-            rules = [(t, i) for _, t, i in rules_rows]
-            rules_payload = [{"trigger": t, "instruction": i} for t, i in rules]
-            rules_with_ids = [
-                {"id": rid, "trigger": t, "instruction": i} for rid, t, i in rules_rows
-            ]
-            persona_text = db.get_bot_persona(bot_id)
-            tone_drift = db.get_tone_drift(bot_id)
-            chat_aliases = db.list_chat_aliases(bot_id, chat_id)
-            return json.dumps(
-                {
-                    "persona_text": persona_text,
-                    "tone_drift": tone_drift,
-                    "preferences": prefs,
-                    "mood": mood,
-                    "conversation_summary": summary,
-                    "long_instructions": mem,
-                    "long_instructions_with_ids": long_with_ids,
-                    "situation_rules": rules_payload,
-                    "situation_rules_with_ids": rules_with_ids,
-                    "chat_aliases": chat_aliases,
-                    "feedback_sensitivity": feedback_sensitivity,
-                },
-                ensure_ascii=False,
-            )
-        if name == "set_preference":
-            key = str(args["key"])
-            raw_val = str(args["value"])
-            if key not in PREFERENCE_KEYS:
-                return json.dumps({"ok": False, "error": "bad key"})
-            val = _parse_pref_value(key, raw_val)
-            patch: dict[str, Any] = {key: val}
-            if key == "frequency":
-                _apply_frequency_to_probs(patch, str(val))
-            if key == "verbosity":
-                _apply_verbosity(patch, str(val))
-            merged = db.merge_settings(bot_id, chat_id, patch)
-            return json.dumps({"ok": True, "merged_preferences": merged}, ensure_ascii=False)
-        if name == "add_long_instruction":
-            lm_pol = app_cfg.long_memory if app_cfg else LongMemoryPolicy()
-            db.add_long_memory(
-                bot_id,
-                chat_id,
-                str(args["text"]),
-                retention_days=lm_pol.retention_days,
-            )
-            return json.dumps({"ok": True}, ensure_ascii=False)
-        if name == "remove_long_instruction":
-            ok = db.delete_long_memory_by_id(bot_id, chat_id, int(args.get("memory_id", 0)))
-            return json.dumps({"ok": ok}, ensure_ascii=False)
-        if name == "set_mood":
-            db.set_mood(bot_id, str(args["mood"]))
-            return json.dumps({"ok": True}, ensure_ascii=False)
-        if name == "update_conversation_summary":
-            db.set_summary(bot_id, chat_id, str(args["summary"]))
-            return json.dumps({"ok": True}, ensure_ascii=False)
-        if name == "add_situation_rule":
-            sr_pol = app_cfg.situation_rules if app_cfg else SituationRulesPolicy()
-            db.add_situation_rule(
-                bot_id,
-                chat_id,
-                trigger_text=str(args.get("trigger_text", "")),
-                instruction_text=str(args.get("instruction_text", "")),
-                max_rows=sr_pol.max_stored,
-                retention_days=sr_pol.retention_days,
-            )
-            return json.dumps({"ok": True}, ensure_ascii=False)
-        if name == "remove_situation_rule":
-            ok = db.delete_situation_rule_by_id(bot_id, chat_id, int(args.get("rule_id", 0)))
-            return json.dumps({"ok": ok}, ensure_ascii=False)
-        if name == "set_bot_persona":
-            db.set_bot_persona(bot_id, str(args.get("text", "")))
-            return json.dumps({"ok": True}, ensure_ascii=False)
-        if name == "add_chat_alias":
-            if not allow_chat_alias_tools:
-                return json.dumps(
-                    {
-                        "ok": False,
-                        "error": "instruction_addressed_to_other_bot",
-                        "hint": (
-                            "В сообщении указан другой бот через @ — add_chat_alias доступен только у того бота, "
-                            "к которому обратились (или без @ ботов в тексте)."
-                        ),
-                    },
-                    ensure_ascii=False,
-                )
-            raw_alias = str(args.get("text", ""))
-            reason = reject_reason_for_chat_alias(raw_alias)
-            if reason:
-                return json.dumps(
-                    {
-                        "ok": False,
-                        "error": reason,
-                        "hint": (
-                            "Алиасы — только фразы, на которые боты должны откликаться. "
-                            "Правила «называйте участника X так-то» — используй add_long_instruction, не add_chat_alias."
-                        ),
-                    },
-                    ensure_ascii=False,
-                )
-            added = db.add_chat_alias(bot_id, chat_id, raw_alias)
-            return json.dumps(
-                {"ok": True, "added": added, "aliases": db.list_chat_aliases(bot_id, chat_id)},
-                ensure_ascii=False,
-            )
-        if name == "remove_chat_alias":
-            if not allow_chat_alias_tools:
-                return json.dumps(
-                    {
-                        "ok": False,
-                        "error": "instruction_addressed_to_other_bot",
-                        "hint": (
-                            "В сообщении указан другой бот через @ — remove_chat_alias только у адресата."
-                        ),
-                    },
-                    ensure_ascii=False,
-                )
-            removed = db.remove_chat_alias(bot_id, chat_id, str(args.get("text", "")))
-            return json.dumps(
-                {"ok": True, "removed": removed, "aliases": db.list_chat_aliases(bot_id, chat_id)},
-                ensure_ascii=False,
-            )
-    except Exception as e:
-        logger.exception("tool error")
-        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
-    return json.dumps({"ok": False, "error": "unknown tool"}, ensure_ascii=False)
 
 
 def build_system_prompt(
@@ -900,10 +372,12 @@ async def maybe_summarize(
         "Сожми следующий фрагмент переписки в краткое саммари на русском (5–10 предложений максимум), "
         "сохрани имена и договорённости:\n\n" + "\n".join(recent_lines[-40:])
     )
-    resp = await client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
+    resp = await _llm_call_with_retry(
+        lambda: client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+        )
     )
     if app_cfg:
         u = getattr(resp, "usage", None)

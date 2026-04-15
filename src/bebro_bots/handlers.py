@@ -3,11 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
+import threading
 import time
-from random import Random
-from typing import TYPE_CHECKING
-
 from telegram import Message, ReactionTypeEmoji, Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, ContextTypes
@@ -17,15 +16,15 @@ from bebro_bots.addressing import (
     command_is_for_this_bot_username,
 )
 from bebro_bots.behavior import Engagement, decide_stochastic_engagement
-from bebro_bots.config import AppConfig, BotPersonaConfig, min_created_at_cutoff
+from bebro_bots.config import AppConfig, BotPersonaConfig, active_daily_input_tokens, active_model, min_created_at_cutoff
 from bebro_bots.db import Database, usage_day_utc_string
 from bebro_bots.llm import (
     CompleteTurnResult,
     build_system_prompt,
     format_recent_for_prompt,
-    maybe_summarize,
-    run_agent_turn,
 )
+import bebro_bots.llm as _openai_llm
+import bebro_bots.anthropic_llm as _anthropic_llm
 from bebro_bots.tone_profile import (
     MOOD_RANDOM_POOL,
     drift_random_axes,
@@ -36,10 +35,32 @@ from bebro_bots.telegram_vision import collect_vision_images_for_turn
 from bebro_bots.chat_aliases_policy import chat_alias_mutations_allowed_for_message
 from bebro_bots.triggers import message_allows_web_search
 
-if TYPE_CHECKING:
-    from openai import AsyncOpenAI
-
 logger = logging.getLogger(__name__)
+
+
+def _ctx_logger(bot_id: str, chat_id: int) -> logging.LoggerAdapter:
+    """Logger с полями bot_id и chat_id в каждой строке."""
+    return logging.LoggerAdapter(logger, {"bot_id": bot_id, "chat_id": chat_id})
+
+
+# Блокировки для последовательных ответов ботов в одном чате.
+# Все экземпляры ботов работают в одном процессе (разные потоки),
+# поэтому threading.Lock обеспечивает: пока бот А не закончит отвечать
+# и не запишет ответ в БД — бот Б не начнёт генерацию и увидит ответ А в tail.
+_chat_locks: dict[int, threading.Lock] = {}
+_chat_locks_guard = threading.Lock()
+
+
+def _get_chat_lock(chat_id: int) -> threading.Lock:
+    with _chat_locks_guard:
+        if chat_id not in _chat_locks:
+            _chat_locks[chat_id] = threading.Lock()
+        return _chat_locks[chat_id]
+
+
+def _llm_module(cfg: AppConfig):
+    """Возвращает модуль с run_agent_turn и maybe_summarize для активного провайдера."""
+    return _anthropic_llm if cfg.provider == "anthropic" else _openai_llm
 
 
 def _allowed_chat(cfg: AppConfig, chat_id: int) -> bool:
@@ -170,10 +191,10 @@ def _format_params_message(
     lim = app_cfg.limits
     lines: list[str] = [
         f"Бот «{bot_id}», чат {chat_id}",
-        f"Модель OpenAI: {app_cfg.openai.model}",
+        f"Провайдер: {app_cfg.provider} / Модель: {active_model(app_cfg)}",
         f"Web search (режим): {app_cfg.web_search.mode}",
         f"Сутки учёта лимитов (UTC): {day}",
-        f"Input-токены (потрачено / лимит): {used_tok} / {lim.daily_input_tokens}",
+        f"Input-токены (потрачено / лимит): {used_tok} / {active_daily_input_tokens(app_cfg)}",
         f"Web search за сутки (потрачено / лимит): {used_ws} / {lim.daily_web_searches}",
         f"Восприимчивость к пожеланиям (конфиг): {app_cfg.feedback_sensitivity} из 5",
         f"Вероятность ответа без @ (конфиг): {app_cfg.reply_probability}",
@@ -400,9 +421,8 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     app_cfg: AppConfig = context.application.bot_data["app_cfg"]
     persona: BotPersonaConfig = context.application.bot_data["persona"]
     db: Database = context.application.bot_data["db"]
-    client: AsyncOpenAI = context.application.bot_data["openai_client"]
+    client = context.application.bot_data["llm_client"]
     model: str = context.application.bot_data["model"]
-    rng: Random = context.application.bot_data["rng"]
 
     chat_id = message.chat_id
     if not _allowed_chat(app_cfg, chat_id):
@@ -425,130 +445,39 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
         eng = Engagement(call_llm=True, force_reply=True)
     else:
-        eng = decide_stochastic_engagement(float(app_cfg.reply_probability), rng)
+        eng = decide_stochastic_engagement(float(app_cfg.reply_probability))
     if not eng.call_llm:
         return
 
-    jmin = int(app_cfg.response_jitter_ms_min)
-    jmax = int(app_cfg.response_jitter_ms_max)
-    if jmax > jmin:
-        await asyncio.sleep(rng.uniform(jmin, jmax) / 1000.0)
-    elif jmax == jmin and jmin > 0:
-        await asyncio.sleep(jmin / 1000.0)
-
-    recent_n = int(settings.get("recent_for_llm", 16))
-    rows = db.recent_messages(persona.id, chat_id, limit=max(recent_n, 5))
-    trigger_mid = message.message_id
-    tail_limit = min(64, max(recent_n * 2, 16))
-    tail_rows = db.messages_after_message_id(persona.id, chat_id, trigger_mid, tail_limit)
-    rows_base = [r for r in rows if r.message_id <= trigger_mid]
-    rows_for_vision = _merge_message_rows_by_message_id(rows_base, tail_rows)
-
-    day = usage_day_utc_string()
-    if not db.input_tokens_below_daily_limit(day, app_cfg.limits.daily_input_tokens):
-        await _maybe_notify_limit(
-            application=context.application,
-            chat_id=chat_id,
-            db=db,
-            app_cfg=app_cfg,
-            kind="input_tokens",
-            text="Дневной лимит запросов к модели исчерпан. Попробуйте позже (лимит обновляется по UTC).",
+    # Захватываем lock чата: следующий бот начнёт генерацию только после того,
+    # как текущий запишет свой ответ в БД — тогда tail будет содержать этот ответ.
+    chat_lock = _get_chat_lock(chat_id)
+    lock_acquired = await asyncio.to_thread(chat_lock.acquire, True, 90.0)
+    if not lock_acquired:
+        logger.warning(
+            "Таймаут ожидания очереди ответа: bot=%s chat=%s mid=%s",
+            persona.id, chat_id, message.message_id,
         )
         return
 
-    msg_text = message.text or message.caption or ""
-    ws_mode = app_cfg.web_search.mode
-    if ws_mode == "always":
-        allow_web_search = True
-    else:
-        allow_web_search = message_allows_web_search(msg_text)
-    if allow_web_search and not db.web_search_below_daily_limit(day, app_cfg.limits.daily_web_searches):
-        await _maybe_notify_limit(
-            application=context.application,
-            chat_id=chat_id,
-            db=db,
-            app_cfg=app_cfg,
-            kind="web_search",
-            text="Дневной лимит поиска в интернете исчерпан. Повторите завтра (сутки по UTC).",
-        )
-        allow_web_search = False
-
-    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-
-    allow_mutations = _allow_learning(message)
-    allow_chat_alias_tools = chat_alias_mutations_allowed_for_message(
-        msg_text,
-        my_username=persona.username,
-        all_bot_usernames=[b.username for b in app_cfg.bots],
-    )
-    sens = int(app_cfg.feedback_sensitivity)
-
-    mood = db.get_mood(persona.id) or persona.mood_default
-    persona_text = db.get_bot_persona(persona.id)
-    tone_instructions, _sit_unused = _compose_prompt_extras(
-        db, persona.id, chat_id, settings, app_cfg,
-    )
-    system = build_system_prompt(
-        personality=persona_text,
-        mood=mood,
-        bot_username=persona.username,
-        allow_web_search=allow_web_search,
-        web_search_mode=ws_mode,
-        tone_instructions=tone_instructions,
-        situation_block="",
-        feedback_sensitivity=sens,
-    )
-    user_lines: list[str] = [
-        "Контекст последних сообщений (ты — ассистент в этом чате):",
-    ]
-    summary = db.get_summary(persona.id, chat_id)
-    if summary:
-        user_lines.append(f"Сжатый контекст (саммари): {summary}")
-    mem_rules = _memory_and_rules_prompt_lines(db, persona.id, chat_id, app_cfg)
-    if mem_rules:
-        user_lines.extend(mem_rules)
-    user_lines.extend(format_recent_for_prompt(rows_base, recent_n))
-    if tail_rows:
-        user_lines.append(
-            "— Сообщения в чате после исходного (появились до твоего ответа; учти при формулировке) —",
-        )
-        user_lines.extend(format_recent_for_prompt(tail_rows, len(tail_rows)))
-
-    vc = app_cfg.vision
-    vision_images = await collect_vision_images_for_turn(
-        context.bot,
-        message,
-        rows_for_vision,
-        enabled=vc.enabled,
-        max_image_bytes=vc.max_image_bytes,
-        max_images=vc.max_images_per_turn,
-        history_photo_policy="if_text_asks",
-    )
-    if vision_images:
-        user_lines.append(
-            "К запросу приложены изображения в хронологическом порядке (по сообщениям в чате); "
-            "они соответствуют пометкам [фото] в контексте выше."
-        )
-
     try:
-        turn = await run_agent_turn(
-            client=client,
-            model=model,
-            db=db,
-            bot_id=persona.id,
-            chat_id=chat_id,
-            system_prompt=system,
-            user_lines=user_lines,
-            force_substantive_reply=eng.force_reply,
-            allow_web_search=allow_web_search,
-            allow_mutations=allow_mutations,
-            allow_chat_alias_tools=allow_chat_alias_tools,
-            feedback_sensitivity=sens,
-            vision_images=vision_images if vision_images else None,
-            app_cfg=app_cfg,
-            web_search_mode=ws_mode,
-        )
-        if turn.blocked_by_input_token_limit:
+        jmin = int(app_cfg.response_jitter_ms_min)
+        jmax = int(app_cfg.response_jitter_ms_max)
+        if jmax > jmin:
+            await asyncio.sleep(random.uniform(jmin, jmax) / 1000.0)
+        elif jmax == jmin and jmin > 0:
+            await asyncio.sleep(jmin / 1000.0)
+
+        recent_n = int(settings.get("recent_for_llm", 16))
+        rows = db.recent_messages(persona.id, chat_id, limit=max(recent_n, 5))
+        trigger_mid = message.message_id
+        tail_limit = min(64, max(recent_n * 2, 16))
+        tail_rows = db.messages_after_message_id(persona.id, chat_id, trigger_mid, tail_limit)
+        rows_base = [r for r in rows if r.message_id <= trigger_mid]
+        rows_for_vision = _merge_message_rows_by_message_id(rows_base, tail_rows)
+
+        day = usage_day_utc_string()
+        if not db.input_tokens_below_daily_limit(day, active_daily_input_tokens(app_cfg)):
             await _maybe_notify_limit(
                 application=context.application,
                 chat_id=chat_id,
@@ -558,32 +487,139 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 text="Дневной лимит запросов к модели исчерпан. Попробуйте позже (лимит обновляется по UTC).",
             )
             return
-        await _execute_turn_result(
-            result=turn.result,
-            application=context.application,
-            chat_id=chat_id,
-            reply_to_message_id=message.message_id,
-            db=db,
-            bot_id=persona.id,
-        )
-    except Exception:
-        logger.exception("LLM turn failed")
 
-    try:
-        csum = app_cfg.conversation_summary
-        if len(rows) >= csum.min_messages_in_window and rng.random() < csum.random_summarize_probability:
-            lines = format_recent_for_prompt(rows, len(rows))
-            await maybe_summarize(
+        msg_text = message.text or message.caption or ""
+        ws_mode = app_cfg.web_search.mode
+        if ws_mode == "always":
+            allow_web_search = True
+        else:
+            allow_web_search = message_allows_web_search(msg_text)
+        if allow_web_search and not db.web_search_below_daily_limit(day, app_cfg.limits.daily_web_searches):
+            await _maybe_notify_limit(
+                application=context.application,
+                chat_id=chat_id,
+                db=db,
+                app_cfg=app_cfg,
+                kind="web_search",
+                text="Дневной лимит поиска в интернете исчерпан. Повторите завтра (сутки по UTC).",
+            )
+            allow_web_search = False
+
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+
+        allow_mutations = _allow_learning(message)
+        allow_chat_alias_tools = chat_alias_mutations_allowed_for_message(
+            msg_text,
+            my_username=persona.username,
+            all_bot_usernames=[b.username for b in app_cfg.bots],
+        )
+        sens = int(app_cfg.feedback_sensitivity)
+
+        mood = db.get_mood(persona.id) or persona.mood_default
+        persona_text = db.get_bot_persona(persona.id)
+        tone_instructions, _sit_unused = _compose_prompt_extras(
+            db, persona.id, chat_id, settings, app_cfg,
+        )
+        system = build_system_prompt(
+            personality=persona_text,
+            mood=mood,
+            bot_username=persona.username,
+            allow_web_search=allow_web_search,
+            web_search_mode=ws_mode,
+            tone_instructions=tone_instructions,
+            situation_block="",
+            feedback_sensitivity=sens,
+        )
+        user_lines: list[str] = [
+            "Контекст последних сообщений (ты — ассистент в этом чате):",
+        ]
+        summary = db.get_summary(persona.id, chat_id)
+        if summary:
+            user_lines.append(f"Сжатый контекст (саммари): {summary}")
+        mem_rules = _memory_and_rules_prompt_lines(db, persona.id, chat_id, app_cfg)
+        if mem_rules:
+            user_lines.extend(mem_rules)
+        user_lines.extend(format_recent_for_prompt(rows_base, recent_n))
+        if tail_rows:
+            user_lines.append(
+                "— Сообщения в чате после исходного (появились до твоего ответа; учти при формулировке) —",
+            )
+            user_lines.extend(format_recent_for_prompt(tail_rows, len(tail_rows)))
+
+        vc = app_cfg.vision
+        vision_images = await collect_vision_images_for_turn(
+            context.bot,
+            message,
+            rows_for_vision,
+            enabled=vc.enabled,
+            max_image_bytes=vc.max_image_bytes,
+            max_images=vc.max_images_per_turn,
+            history_photo_policy="if_text_asks",
+        )
+        if vision_images:
+            user_lines.append(
+                "К запросу приложены изображения в хронологическом порядке (по сообщениям в чате); "
+                "они соответствуют пометкам [фото] в контексте выше."
+            )
+
+        llm = _llm_module(app_cfg)
+        try:
+            turn = await llm.run_agent_turn(
                 client=client,
                 model=model,
                 db=db,
                 bot_id=persona.id,
                 chat_id=chat_id,
-                recent_lines=lines,
+                system_prompt=system,
+                user_lines=user_lines,
+                force_substantive_reply=eng.force_reply,
+                allow_web_search=allow_web_search,
+                allow_mutations=allow_mutations,
+                allow_chat_alias_tools=allow_chat_alias_tools,
+                feedback_sensitivity=sens,
+                vision_images=vision_images if vision_images else None,
                 app_cfg=app_cfg,
+                web_search_mode=ws_mode,
             )
-    except Exception:
-        logger.exception("summarize failed")
+            if turn.blocked_by_input_token_limit:
+                await _maybe_notify_limit(
+                    application=context.application,
+                    chat_id=chat_id,
+                    db=db,
+                    app_cfg=app_cfg,
+                    kind="input_tokens",
+                    text="Дневной лимит запросов к модели исчерпан. Попробуйте позже (лимит обновляется по UTC).",
+                )
+                return
+            await _execute_turn_result(
+                result=turn.result,
+                application=context.application,
+                chat_id=chat_id,
+                reply_to_message_id=message.message_id,
+                db=db,
+                bot_id=persona.id,
+            )
+        except Exception:
+            _ctx_logger(persona.id, chat_id).exception("LLM turn failed")
+
+        try:
+            csum = app_cfg.conversation_summary
+            if len(rows) >= csum.min_messages_in_window and random.random() < csum.random_summarize_probability:
+                lines = format_recent_for_prompt(rows, len(rows))
+                await llm.maybe_summarize(
+                    client=client,
+                    model=model,
+                    db=db,
+                    bot_id=persona.id,
+                    chat_id=chat_id,
+                    recent_lines=lines,
+                    app_cfg=app_cfg,
+                )
+        except Exception:
+            _ctx_logger(persona.id, chat_id).exception("summarize failed")
+
+    finally:
+        chat_lock.release()
 
 
 async def on_ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -628,6 +664,70 @@ async def on_admin_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     db.clear_chat_memory(persona.id, chat_id)
     await message.reply_text("Память для этого чата очищена.")
+
+
+async def on_admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Выгружает long_memory, situation_rules и chat_aliases текущего чата текстом."""
+    message = update.effective_message
+    user = update.effective_user
+    app_cfg: AppConfig = context.application.bot_data["app_cfg"]
+    persona: BotPersonaConfig = context.application.bot_data["persona"]
+    db: Database = context.application.bot_data["db"]
+    if not message or not user:
+        return
+    if not command_is_for_this_bot_username(message, persona.username):
+        return
+    chat_id = message.chat_id
+    if not _allowed_chat(app_cfg, chat_id):
+        await message.reply_text("Access denied")
+        return
+    if not _is_admin(app_cfg, user.id, user.username):
+        await message.reply_text("Команда только для администраторов из конфигурации.")
+        return
+
+    sr = app_cfg.situation_rules
+    lm = app_cfg.long_memory
+    mem_rows = db.list_long_memory_with_ids(
+        persona.id,
+        chat_id,
+        limit=lm.context_limit,
+        min_created_at=min_created_at_cutoff(lm.retention_days),
+    )
+    rules_rows = db.list_situation_rules_with_ids(
+        persona.id,
+        chat_id,
+        limit=min(200, sr.max_stored),
+        min_created_at=min_created_at_cutoff(sr.retention_days),
+    )
+    aliases = db.list_chat_aliases(persona.id, chat_id)
+
+    lines: list[str] = [f"=== Экспорт: бот «{persona.id}», чат {chat_id} ===", ""]
+    lines.append("--- long_memory ---")
+    if mem_rows:
+        for mid, txt in mem_rows:
+            lines.append(f"[id={mid}] {txt}")
+    else:
+        lines.append("(пусто)")
+    lines.append("")
+    lines.append("--- situation_rules ---")
+    if rules_rows:
+        for rid, trig, ins in rules_rows:
+            lines.append(f"[id={rid}] когда: {trig}")
+            lines.append(f"        → {ins}")
+    else:
+        lines.append("(пусто)")
+    lines.append("")
+    lines.append("--- chat_aliases ---")
+    if aliases:
+        for a in aliases:
+            lines.append(f"• {a}")
+    else:
+        lines.append("(пусто)")
+
+    text = "\n".join(lines)
+    if len(text) > 4090:
+        text = text[:4080] + "\n…(обрезано)"
+    await message.reply_text(text)
 
 
 async def on_bebro_params(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -685,20 +785,19 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     persona: BotPersonaConfig = app.bot_data["persona"]
     db: Database = app.bot_data["db"]
     app_cfg: AppConfig = app.bot_data["app_cfg"]
-    client: AsyncOpenAI = app.bot_data["openai_client"]
+    client = app.bot_data["llm_client"]
     model: str = app.bot_data["model"]
-    rng: Random = app.bot_data["rng"]
 
     chats = db.distinct_chat_ids(persona.id)
     if not chats:
         return
-    rng.shuffle(chats)
+    random.shuffle(chats)
     chat_id = chats[0]
     if not _allowed_chat(app_cfg, chat_id):
         return
 
     settings = db.get_settings(persona.id, chat_id)
-    if rng.random() > float(settings.get("initiative_probability", 0.05)):
+    if random.random() > float(settings.get("initiative_probability", 0.05)):
         return
 
     interval = float(settings.get("initiative_interval_minutes", 90)) * 60.0
@@ -708,7 +807,7 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     day = usage_day_utc_string()
-    if not db.input_tokens_below_daily_limit(day, app_cfg.limits.daily_input_tokens):
+    if not db.input_tokens_below_daily_limit(day, active_daily_input_tokens(app_cfg)):
         return
 
     mood = db.get_mood(persona.id) or persona.mood_default
@@ -748,8 +847,9 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         user_lines.append(
             "К запросу приложены изображения в хронологическом порядке; они соответствуют пометкам [фото] в контексте выше."
         )
+    llm = _llm_module(app_cfg)
     try:
-        turn = await run_agent_turn(
+        turn = await llm.run_agent_turn(
             client=client,
             model=model,
             db=db,
@@ -784,7 +884,7 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         db.set_last_initiative_ts(persona.id, chat_id, now)
     except Exception:
-        logger.exception("initiative failed")
+        _ctx_logger(persona.id, chat_id).exception("initiative failed")
 
 
 async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -793,26 +893,25 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     persona: BotPersonaConfig = app.bot_data["persona"]
     db: Database = app.bot_data["db"]
     app_cfg: AppConfig = app.bot_data["app_cfg"]
-    client: AsyncOpenAI = app.bot_data["openai_client"]
+    client = app.bot_data["llm_client"]
     model: str = app.bot_data["model"]
-    rng: Random = app.bot_data["rng"]
 
     chats = db.distinct_chat_ids(persona.id)
     if not chats:
         return
-    rng.shuffle(chats)
+    random.shuffle(chats)
     chat_id = chats[0]
     if not _allowed_chat(app_cfg, chat_id):
         return
 
     day = usage_day_utc_string()
-    if not db.input_tokens_below_daily_limit(day, app_cfg.limits.daily_input_tokens):
+    if not db.input_tokens_below_daily_limit(day, active_daily_input_tokens(app_cfg)):
         return
 
     settings = db.get_settings(persona.id, chat_id)
     sens = max(1, min(5, int(app_cfg.feedback_sensitivity)))
     base_p = float(settings.get("proactive_reaction_probability", 0.04))
-    if rng.random() > base_p * (sens / 5.0):
+    if random.random() > base_p * (sens / 5.0):
         return
 
     me = await app.bot.get_me()
@@ -828,7 +927,7 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     ]
     if not candidates:
         return
-    target = rng.choice(candidates)
+    target = random.choice(candidates)
     who = target.username or (str(target.user_id) if target.user_id else "?")
     if target.content_type == "sticker" and target.sticker_file_id:
         line = f"[{who}] [sticker file_id={target.sticker_file_id}]"
@@ -872,8 +971,9 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         user_lines.append(
             "К указанному сообщению приложено изображение — учти содержимое при выборе emoji."
         )
+    llm = _llm_module(app_cfg)
     try:
-        turn = await run_agent_turn(
+        turn = await llm.run_agent_turn(
             client=client,
             model=model,
             db=db,
@@ -901,7 +1001,7 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 bot_id=persona.id,
             )
     except Exception:
-        logger.exception("proactive_reaction failed")
+        _ctx_logger(persona.id, chat_id).exception("proactive_reaction failed")
 
 
 async def random_tone_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -910,14 +1010,13 @@ async def random_tone_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     persona: BotPersonaConfig = app.bot_data["persona"]
     db: Database = app.bot_data["db"]
     app_cfg: AppConfig = app.bot_data["app_cfg"]
-    rng: Random = app.bot_data["rng"]
 
     sens = max(1, min(5, int(app_cfg.feedback_sensitivity)))
-    if rng.random() > 0.18 * (sens / 5.0):
+    if random.random() > 0.18 * (sens / 5.0):
         return
 
-    drift = drift_random_axes(rng)
+    drift = drift_random_axes()
     db.set_tone_drift(persona.id, drift)
-    if rng.random() < 0.45:
-        db.set_mood(persona.id, rng.choice(MOOD_RANDOM_POOL))
+    if random.random() < 0.45:
+        db.set_mood(persona.id, random.choice(MOOD_RANDOM_POOL))
     logger.info("Случайный сдвиг тона для бота %s: %s", persona.id, drift)

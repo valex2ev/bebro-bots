@@ -93,6 +93,19 @@ def data_url_for_openai(data: bytes, mime: str) -> str:
     return f"data:{mime};base64,{b64}"
 
 
+def image_block_for_anthropic(data: bytes, mime: str) -> dict:
+    """Блок изображения в формате Anthropic Messages API (base64 source)."""
+    b64 = base64.standard_b64encode(data).decode("ascii")
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": mime,
+            "data": b64,
+        },
+    }
+
+
 async def download_photo_file_bytes(bot: Bot, file_id: str) -> bytes:
     tg_file = await bot.get_file(file_id)
     buf = await tg_file.download_as_bytearray()
