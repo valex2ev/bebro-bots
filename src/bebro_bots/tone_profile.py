@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from random import Random
 from typing import Any
 
 # Значения: -1 (низко / вторая полюса), 0 нейтрально, 1 (высоко / первая полюса)
@@ -92,14 +93,15 @@ def format_situation_rules_block(rules: list[tuple[str, str]]) -> str:
     return "Ситуационные договорённости (кратко):\n" + "\n".join(lines)
 
 
-def drift_random_axes() -> dict[str, int]:
+def drift_random_axes(rng: Random | None = None) -> dict[str, int]:
     """Небольшой случайный сдвиг по части осей (-1, 0, 1)."""
     import random
 
+    r = rng if rng is not None else random
     drift: dict[str, int] = {}
     for k in TONE_KEYS:
-        if random.random() < 0.15:
-            drift[k] = random.choice((-1, 0, 1))
+        if r.random() < 0.15:
+            drift[k] = r.choice((-1, 0, 1))
     if not drift:
-        drift[random.choice(TONE_KEYS)] = random.choice((-1, 1))
+        drift[r.choice(TONE_KEYS)] = r.choice((-1, 1))
     return drift

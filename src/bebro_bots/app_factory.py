@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import sys
 from typing import TYPE_CHECKING
 
@@ -107,6 +108,7 @@ def build_application(
     application.bot_data["openai_client"] = client
     application.bot_data["model"] = app_cfg.openai.model
     application.bot_data["feedback_sensitivity"] = app_cfg.feedback_sensitivity
+    application.bot_data["rng"] = random.Random()
 
     group = filters.ChatType.GROUPS
     msg_filter = group & ~filters.COMMAND & (

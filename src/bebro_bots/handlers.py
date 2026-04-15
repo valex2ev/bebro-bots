@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import random
 import re
 import time
+from random import Random
 from typing import TYPE_CHECKING
 
 from telegram import Message, ReactionTypeEmoji, Update
@@ -402,6 +402,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     db: Database = context.application.bot_data["db"]
     client: AsyncOpenAI = context.application.bot_data["openai_client"]
     model: str = context.application.bot_data["model"]
+    rng: Random = context.application.bot_data["rng"]
 
     chat_id = message.chat_id
     if not _allowed_chat(app_cfg, chat_id):
@@ -424,14 +425,14 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
         eng = Engagement(call_llm=True, force_reply=True)
     else:
-        eng = decide_stochastic_engagement(float(app_cfg.reply_probability))
+        eng = decide_stochastic_engagement(float(app_cfg.reply_probability), rng)
     if not eng.call_llm:
         return
 
     jmin = int(app_cfg.response_jitter_ms_min)
     jmax = int(app_cfg.response_jitter_ms_max)
     if jmax > jmin:
-        await asyncio.sleep(random.uniform(jmin, jmax) / 1000.0)
+        await asyncio.sleep(rng.uniform(jmin, jmax) / 1000.0)
     elif jmax == jmin and jmin > 0:
         await asyncio.sleep(jmin / 1000.0)
 
@@ -570,7 +571,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     try:
         csum = app_cfg.conversation_summary
-        if len(rows) >= csum.min_messages_in_window and random.random() < csum.random_summarize_probability:
+        if len(rows) >= csum.min_messages_in_window and rng.random() < csum.random_summarize_probability:
             lines = format_recent_for_prompt(rows, len(rows))
             await maybe_summarize(
                 client=client,
@@ -686,17 +687,18 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     app_cfg: AppConfig = app.bot_data["app_cfg"]
     client: AsyncOpenAI = app.bot_data["openai_client"]
     model: str = app.bot_data["model"]
+    rng: Random = app.bot_data["rng"]
 
     chats = db.distinct_chat_ids(persona.id)
     if not chats:
         return
-    random.shuffle(chats)
+    rng.shuffle(chats)
     chat_id = chats[0]
     if not _allowed_chat(app_cfg, chat_id):
         return
 
     settings = db.get_settings(persona.id, chat_id)
-    if random.random() > float(settings.get("initiative_probability", 0.05)):
+    if rng.random() > float(settings.get("initiative_probability", 0.05)):
         return
 
     interval = float(settings.get("initiative_interval_minutes", 90)) * 60.0
@@ -793,11 +795,12 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     app_cfg: AppConfig = app.bot_data["app_cfg"]
     client: AsyncOpenAI = app.bot_data["openai_client"]
     model: str = app.bot_data["model"]
+    rng: Random = app.bot_data["rng"]
 
     chats = db.distinct_chat_ids(persona.id)
     if not chats:
         return
-    random.shuffle(chats)
+    rng.shuffle(chats)
     chat_id = chats[0]
     if not _allowed_chat(app_cfg, chat_id):
         return
@@ -809,7 +812,7 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = db.get_settings(persona.id, chat_id)
     sens = max(1, min(5, int(app_cfg.feedback_sensitivity)))
     base_p = float(settings.get("proactive_reaction_probability", 0.04))
-    if random.random() > base_p * (sens / 5.0):
+    if rng.random() > base_p * (sens / 5.0):
         return
 
     me = await app.bot.get_me()
@@ -825,7 +828,7 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     ]
     if not candidates:
         return
-    target = random.choice(candidates)
+    target = rng.choice(candidates)
     who = target.username or (str(target.user_id) if target.user_id else "?")
     if target.content_type == "sticker" and target.sticker_file_id:
         line = f"[{who}] [sticker file_id={target.sticker_file_id}]"
@@ -907,13 +910,14 @@ async def random_tone_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     persona: BotPersonaConfig = app.bot_data["persona"]
     db: Database = app.bot_data["db"]
     app_cfg: AppConfig = app.bot_data["app_cfg"]
+    rng: Random = app.bot_data["rng"]
 
     sens = max(1, min(5, int(app_cfg.feedback_sensitivity)))
-    if random.random() > 0.18 * (sens / 5.0):
+    if rng.random() > 0.18 * (sens / 5.0):
         return
 
-    drift = drift_random_axes()
+    drift = drift_random_axes(rng)
     db.set_tone_drift(persona.id, drift)
-    if random.random() < 0.45:
-        db.set_mood(persona.id, random.choice(MOOD_RANDOM_POOL))
+    if rng.random() < 0.45:
+        db.set_mood(persona.id, rng.choice(MOOD_RANDOM_POOL))
     logger.info("Случайный сдвиг тона для бота %s: %s", persona.id, drift)
