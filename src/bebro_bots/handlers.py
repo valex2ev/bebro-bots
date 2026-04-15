@@ -7,8 +7,6 @@ import random
 import re
 import threading
 import time
-from typing import TYPE_CHECKING
-
 from telegram import Message, ReactionTypeEmoji, Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, ContextTypes
@@ -18,15 +16,15 @@ from bebro_bots.addressing import (
     command_is_for_this_bot_username,
 )
 from bebro_bots.behavior import Engagement, decide_stochastic_engagement
-from bebro_bots.config import AppConfig, BotPersonaConfig, min_created_at_cutoff
+from bebro_bots.config import AppConfig, BotPersonaConfig, active_daily_input_tokens, min_created_at_cutoff
 from bebro_bots.db import Database, usage_day_utc_string
 from bebro_bots.llm import (
     CompleteTurnResult,
     build_system_prompt,
     format_recent_for_prompt,
-    maybe_summarize,
-    run_agent_turn,
 )
+import bebro_bots.llm as _openai_llm
+import bebro_bots.anthropic_llm as _anthropic_llm
 from bebro_bots.tone_profile import (
     MOOD_RANDOM_POOL,
     drift_random_axes,
@@ -36,9 +34,6 @@ from bebro_bots.tone_profile import (
 from bebro_bots.telegram_vision import collect_vision_images_for_turn
 from bebro_bots.chat_aliases_policy import chat_alias_mutations_allowed_for_message
 from bebro_bots.triggers import message_allows_web_search
-
-if TYPE_CHECKING:
-    from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +50,11 @@ def _get_chat_lock(chat_id: int) -> threading.Lock:
         if chat_id not in _chat_locks:
             _chat_locks[chat_id] = threading.Lock()
         return _chat_locks[chat_id]
+
+
+def _llm_module(cfg: AppConfig):
+    """Возвращает модуль с run_agent_turn и maybe_summarize для активного провайдера."""
+    return _anthropic_llm if cfg.provider == "anthropic" else _openai_llm
 
 
 def _allowed_chat(cfg: AppConfig, chat_id: int) -> bool:
@@ -415,7 +415,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     app_cfg: AppConfig = context.application.bot_data["app_cfg"]
     persona: BotPersonaConfig = context.application.bot_data["persona"]
     db: Database = context.application.bot_data["db"]
-    client: AsyncOpenAI = context.application.bot_data["openai_client"]
+    client = context.application.bot_data["llm_client"]
     model: str = context.application.bot_data["model"]
 
     chat_id = message.chat_id
@@ -471,7 +471,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         rows_for_vision = _merge_message_rows_by_message_id(rows_base, tail_rows)
 
         day = usage_day_utc_string()
-        if not db.input_tokens_below_daily_limit(day, app_cfg.limits.daily_input_tokens):
+        if not db.input_tokens_below_daily_limit(day, active_daily_input_tokens(app_cfg)):
             await _maybe_notify_limit(
                 application=context.application,
                 chat_id=chat_id,
@@ -556,8 +556,9 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 "они соответствуют пометкам [фото] в контексте выше."
             )
 
+        llm = _llm_module(app_cfg)
         try:
-            turn = await run_agent_turn(
+            turn = await llm.run_agent_turn(
                 client=client,
                 model=model,
                 db=db,
@@ -599,7 +600,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             csum = app_cfg.conversation_summary
             if len(rows) >= csum.min_messages_in_window and random.random() < csum.random_summarize_probability:
                 lines = format_recent_for_prompt(rows, len(rows))
-                await maybe_summarize(
+                await llm.maybe_summarize(
                     client=client,
                     model=model,
                     db=db,
@@ -714,7 +715,7 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     persona: BotPersonaConfig = app.bot_data["persona"]
     db: Database = app.bot_data["db"]
     app_cfg: AppConfig = app.bot_data["app_cfg"]
-    client: AsyncOpenAI = app.bot_data["openai_client"]
+    client = app.bot_data["llm_client"]
     model: str = app.bot_data["model"]
 
     chats = db.distinct_chat_ids(persona.id)
@@ -736,7 +737,7 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     day = usage_day_utc_string()
-    if not db.input_tokens_below_daily_limit(day, app_cfg.limits.daily_input_tokens):
+    if not db.input_tokens_below_daily_limit(day, active_daily_input_tokens(app_cfg)):
         return
 
     mood = db.get_mood(persona.id) or persona.mood_default
@@ -776,8 +777,9 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         user_lines.append(
             "К запросу приложены изображения в хронологическом порядке; они соответствуют пометкам [фото] в контексте выше."
         )
+    llm = _llm_module(app_cfg)
     try:
-        turn = await run_agent_turn(
+        turn = await llm.run_agent_turn(
             client=client,
             model=model,
             db=db,
@@ -821,7 +823,7 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     persona: BotPersonaConfig = app.bot_data["persona"]
     db: Database = app.bot_data["db"]
     app_cfg: AppConfig = app.bot_data["app_cfg"]
-    client: AsyncOpenAI = app.bot_data["openai_client"]
+    client = app.bot_data["llm_client"]
     model: str = app.bot_data["model"]
 
     chats = db.distinct_chat_ids(persona.id)
@@ -833,7 +835,7 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     day = usage_day_utc_string()
-    if not db.input_tokens_below_daily_limit(day, app_cfg.limits.daily_input_tokens):
+    if not db.input_tokens_below_daily_limit(day, active_daily_input_tokens(app_cfg)):
         return
 
     settings = db.get_settings(persona.id, chat_id)
@@ -899,8 +901,9 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         user_lines.append(
             "К указанному сообщению приложено изображение — учти содержимое при выборе emoji."
         )
+    llm = _llm_module(app_cfg)
     try:
-        turn = await run_agent_turn(
+        turn = await llm.run_agent_turn(
             client=client,
             model=model,
             db=db,

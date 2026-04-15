@@ -1,9 +1,21 @@
 # Скопируйте в config.yaml и поправьте. Токены — только через .env (см. token_env).
 
+# Активный LLM-провайдер: openai или anthropic.
+# Переключение без перезапуска конфигурации — достаточно изменить это поле.
+provider: openai
+
 openai:
   api_key_env: OPENAI_API_KEY
-  model: gpt-5.4-mini
+  model: gpt-4o-mini
   base_url: null  # например https://api.openai.com/v1 — по умолчанию клиент OpenAI
+  # Суточный лимит prompt-токенов (UTC, все боты и чаты). Учёт в SQLite.
+  daily_input_tokens: 650000
+
+anthropic:
+  api_key_env: ANTHROPIC_API_KEY
+  model: claude-opus-4-6
+  # Суточный лимит input-токенов Anthropic (UTC, все боты и чаты).
+  daily_input_tokens: 300000
 
 server:
   webhook_host: "0.0.0.0"
@@ -15,8 +27,8 @@ server:
 sqlite_path: data/bebro.sqlite
 
 # Глобальные суточные лимиты (UTC, все боты и чаты вместе). Учёт в SQLite.
+# Лимит токенов — в секции провайдера (openai.daily_input_tokens / anthropic.daily_input_tokens).
 limits:
-  daily_input_tokens: 650000
   daily_web_searches: 30
   use_utc_calendar_day: true
 

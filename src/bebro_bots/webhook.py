@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Request
 from telegram import Update
 
 from bebro_bots.app_factory import build_application
-from bebro_bots.config import create_openai_client, load_app_config
+from bebro_bots.config import create_llm_client, load_app_config
 from bebro_bots.db import Database
 
 logger = logging.getLogger(__name__)
@@ -20,7 +20,7 @@ _apps: dict[str, Any] = {}
 async def _lifespan(app: FastAPI):
     cfg = load_app_config()
     db = Database(cfg.sqlite_path)
-    client = create_openai_client(cfg)
+    client = create_llm_client(cfg)
     if not cfg.bots:
         raise RuntimeError("Нет ботов в конфиге")
     for persona in cfg.bots:
