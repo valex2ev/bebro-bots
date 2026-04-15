@@ -155,9 +155,11 @@ class Database:
                   ON situation_rules(bot_id, chat_id, updated_at DESC);
 
                 CREATE TABLE IF NOT EXISTS global_usage_daily (
-                  usage_day TEXT PRIMARY KEY,
+                  usage_day TEXT NOT NULL,
+                  provider TEXT NOT NULL DEFAULT 'openai',
                   input_tokens INTEGER NOT NULL DEFAULT 0,
-                  web_searches INTEGER NOT NULL DEFAULT 0
+                  web_searches INTEGER NOT NULL DEFAULT 0,
+                  PRIMARY KEY (usage_day, provider)
                 );
 
                 CREATE TABLE IF NOT EXISTS limit_notify_cooldown (
@@ -180,6 +182,7 @@ class Database:
         if "photo_file_id" not in cm:
             conn.execute("ALTER TABLE chat_messages ADD COLUMN photo_file_id TEXT")
         self._migrate_chat_aliases_bot_id(conn)
+        self._migrate_global_usage_provider(conn)
         n = purge_username_like_aliases(conn)
         if n:
             logger.info(
@@ -249,6 +252,36 @@ class Database:
                     (bid, cid, str(r["alias_text"]), float(r["created_at"])),
                 )
         conn.execute("DROP TABLE chat_aliases_old")
+
+    def _migrate_global_usage_provider(self, conn: sqlite3.Connection) -> None:
+        """Добавляет колонку provider в global_usage_daily и меняет PK на (usage_day, provider).
+
+        Существующие строки атрибутируются как provider='openai'.
+        """
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(global_usage_daily)").fetchall()}
+        if "provider" in cols:
+            return
+        logger.info("Миграция global_usage_daily: добавление поля provider, старые данные → openai")
+        conn.execute("ALTER TABLE global_usage_daily RENAME TO global_usage_daily_old")
+        conn.execute(
+            """
+            CREATE TABLE global_usage_daily (
+              usage_day TEXT NOT NULL,
+              provider TEXT NOT NULL DEFAULT 'openai',
+              input_tokens INTEGER NOT NULL DEFAULT 0,
+              web_searches INTEGER NOT NULL DEFAULT 0,
+              PRIMARY KEY (usage_day, provider)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO global_usage_daily (usage_day, provider, input_tokens, web_searches)
+            SELECT usage_day, 'openai', input_tokens, web_searches
+            FROM global_usage_daily_old
+            """
+        )
+        conn.execute("DROP TABLE global_usage_daily_old")
 
     @staticmethod
     def normalize_alias_text(raw: str) -> str:
@@ -836,52 +869,52 @@ class Database:
                 (bot_id, chat_id),
             )
 
-    def get_global_usage(self, usage_day: str) -> tuple[int, int]:
+    def get_global_usage(self, usage_day: str, provider: str = "openai") -> tuple[int, int]:
         with self.connect() as conn:
             row = conn.execute(
-                "SELECT input_tokens, web_searches FROM global_usage_daily WHERE usage_day=?",
-                (usage_day,),
+                "SELECT input_tokens, web_searches FROM global_usage_daily WHERE usage_day=? AND provider=?",
+                (usage_day, provider),
             ).fetchone()
         if not row:
             return (0, 0)
         return (int(row["input_tokens"]), int(row["web_searches"]))
 
-    def input_tokens_below_daily_limit(self, usage_day: str, daily_limit: int) -> bool:
+    def input_tokens_below_daily_limit(self, usage_day: str, daily_limit: int, provider: str = "openai") -> bool:
         if daily_limit <= 0:
             return True
-        used, _ = self.get_global_usage(usage_day)
+        used, _ = self.get_global_usage(usage_day, provider)
         return used < daily_limit
 
-    def add_input_tokens(self, usage_day: str, n: int) -> None:
+    def add_input_tokens(self, usage_day: str, n: int, provider: str = "openai") -> None:
         if n <= 0:
             return
         with self.connect() as conn:
             conn.execute(
                 """
-                INSERT INTO global_usage_daily (usage_day, input_tokens, web_searches)
-                VALUES (?, ?, 0)
-                ON CONFLICT(usage_day) DO UPDATE SET
+                INSERT INTO global_usage_daily (usage_day, provider, input_tokens, web_searches)
+                VALUES (?, ?, ?, 0)
+                ON CONFLICT(usage_day, provider) DO UPDATE SET
                   input_tokens = global_usage_daily.input_tokens + excluded.input_tokens
                 """,
-                (usage_day, n),
+                (usage_day, provider, n),
             )
 
-    def web_search_below_daily_limit(self, usage_day: str, daily_limit: int) -> bool:
+    def web_search_below_daily_limit(self, usage_day: str, daily_limit: int, provider: str = "openai") -> bool:
         if daily_limit <= 0:
             return True
-        _, used = self.get_global_usage(usage_day)
+        _, used = self.get_global_usage(usage_day, provider)
         return used < daily_limit
 
-    def increment_web_search(self, usage_day: str) -> None:
+    def increment_web_search(self, usage_day: str, provider: str = "openai") -> None:
         with self.connect() as conn:
             conn.execute(
                 """
-                INSERT INTO global_usage_daily (usage_day, input_tokens, web_searches)
-                VALUES (?, 0, 1)
-                ON CONFLICT(usage_day) DO UPDATE SET
+                INSERT INTO global_usage_daily (usage_day, provider, input_tokens, web_searches)
+                VALUES (?, ?, 0, 1)
+                ON CONFLICT(usage_day, provider) DO UPDATE SET
                   web_searches = global_usage_daily.web_searches + 1
                 """,
-                (usage_day,),
+                (usage_day, provider),
             )
 
     def can_send_limit_notify(self, chat_id: int, limit_kind: str, cooldown_seconds: float) -> bool:

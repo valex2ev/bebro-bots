@@ -95,7 +95,7 @@ async def run_agent_turn(
     day = usage_day or usage_day_utc_string()
     if app_cfg and record_usage:
         limit = app_cfg.anthropic.daily_input_tokens
-        if not db.input_tokens_below_daily_limit(day, limit):
+        if not db.input_tokens_below_daily_limit(day, limit, provider="anthropic"):
             return AgentTurnResult(
                 CompleteTurnResult(action="none", text=None, reaction_emoji=None, sticker_file_id=None),
                 blocked_by_input_token_limit=True,
@@ -145,7 +145,7 @@ async def run_agent_turn(
         if app_cfg and record_usage:
             pt = getattr(getattr(resp, "usage", None), "input_tokens", None)
             if pt is not None:
-                db.add_input_tokens(day, int(pt))
+                db.add_input_tokens(day, int(pt), provider="anthropic")
 
         # resp.content — список блоков: TextBlock | ToolUseBlock
         tool_use_blocks = [b for b in resp.content if b.type == "tool_use"]
@@ -237,7 +237,7 @@ async def maybe_summarize(
     day = usage_day_utc_string()
     if app_cfg:
         limit = app_cfg.anthropic.daily_input_tokens
-        if not db.input_tokens_below_daily_limit(day, limit):
+        if not db.input_tokens_below_daily_limit(day, limit, provider="anthropic"):
             return
     prompt = (
         "Сожми следующий фрагмент переписки в краткое саммари на русском (5–10 предложений максимум), "
@@ -254,7 +254,7 @@ async def maybe_summarize(
     if app_cfg:
         pt = getattr(getattr(resp, "usage", None), "input_tokens", None)
         if pt is not None:
-            db.add_input_tokens(day, int(pt))
+            db.add_input_tokens(day, int(pt), provider="anthropic")
     text_blocks = [b for b in resp.content if b.type == "text"]
     text = " ".join(b.text for b in text_blocks if b.text).strip()
     if text:

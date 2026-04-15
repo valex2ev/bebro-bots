@@ -187,7 +187,7 @@ def _format_params_message(
         min_created_at=min_created_at_cutoff(sr.retention_days),
     )
     day = usage_day_utc_string()
-    used_tok, used_ws = db.get_global_usage(day)
+    used_tok, used_ws = db.get_global_usage(day, provider=app_cfg.provider)
     lim = app_cfg.limits
     lines: list[str] = [
         f"Бот «{bot_id}», чат {chat_id}",
@@ -477,7 +477,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         rows_for_vision = _merge_message_rows_by_message_id(rows_base, tail_rows)
 
         day = usage_day_utc_string()
-        if not db.input_tokens_below_daily_limit(day, active_daily_input_tokens(app_cfg)):
+        if not db.input_tokens_below_daily_limit(day, active_daily_input_tokens(app_cfg), provider=app_cfg.provider):
             await _maybe_notify_limit(
                 application=context.application,
                 chat_id=chat_id,
@@ -807,7 +807,7 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     day = usage_day_utc_string()
-    if not db.input_tokens_below_daily_limit(day, active_daily_input_tokens(app_cfg)):
+    if not db.input_tokens_below_daily_limit(day, active_daily_input_tokens(app_cfg), provider=app_cfg.provider):
         return
 
     mood = db.get_mood(persona.id) or persona.mood_default
@@ -905,7 +905,7 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     day = usage_day_utc_string()
-    if not db.input_tokens_below_daily_limit(day, active_daily_input_tokens(app_cfg)):
+    if not db.input_tokens_below_daily_limit(day, active_daily_input_tokens(app_cfg), provider=app_cfg.provider):
         return
 
     settings = db.get_settings(persona.id, chat_id)

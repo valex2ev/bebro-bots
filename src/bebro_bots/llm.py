@@ -157,7 +157,7 @@ async def run_agent_turn(
 ) -> AgentTurnResult:
     day = usage_day or usage_day_utc_string()
     if app_cfg and record_usage:
-        if not db.input_tokens_below_daily_limit(day, app_cfg.limits.daily_input_tokens):
+        if not db.input_tokens_below_daily_limit(day, app_cfg.limits.daily_input_tokens, provider="openai"):
             return AgentTurnResult(
                 CompleteTurnResult(action="none", text=None, reaction_emoji=None, sticker_file_id=None),
                 blocked_by_input_token_limit=True,
@@ -199,7 +199,7 @@ async def run_agent_turn(
             u = getattr(resp, "usage", None)
             pt = getattr(u, "prompt_tokens", None) if u is not None else None
             if pt is not None:
-                db.add_input_tokens(day, int(pt))
+                db.add_input_tokens(day, int(pt), provider="openai")
 
         choice = resp.choices[0].message
         if choice.tool_calls:
@@ -366,7 +366,7 @@ async def maybe_summarize(
 ) -> None:
     """Периодическое обновление саммари по последним репликам."""
     day = usage_day_utc_string()
-    if app_cfg and not db.input_tokens_below_daily_limit(day, app_cfg.limits.daily_input_tokens):
+    if app_cfg and not db.input_tokens_below_daily_limit(day, app_cfg.limits.daily_input_tokens, provider="openai"):
         return
     prompt = (
         "Сожми следующий фрагмент переписки в краткое саммари на русском (5–10 предложений максимум), "
@@ -383,7 +383,7 @@ async def maybe_summarize(
         u = getattr(resp, "usage", None)
         pt = getattr(u, "prompt_tokens", None) if u is not None else None
         if pt is not None:
-            db.add_input_tokens(day, int(pt))
+            db.add_input_tokens(day, int(pt), provider="openai")
     text = (resp.choices[0].message.content or "").strip()
     if text:
         db.set_summary(bot_id, chat_id, text)
