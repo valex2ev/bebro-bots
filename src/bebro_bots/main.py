@@ -36,10 +36,22 @@ def _run_polling() -> None:
 
 
 def main() -> None:
+    # Добавляем поля bot_id/chat_id по умолчанию во все записи логов
+    # (LoggerAdapter в handlers.py переопределяет их для конкретных событий)
+    _orig_factory = logging.getLogRecordFactory()
+
+    def _record_factory(*args, **kwargs):
+        record = _orig_factory(*args, **kwargs)
+        if not hasattr(record, "bot_id"):
+            record.bot_id = "-"
+        if not hasattr(record, "chat_id"):
+            record.chat_id = "-"
+        return record
+
+    logging.setLogRecordFactory(_record_factory)
     logging.basicConfig(
         format="%(asctime)s %(levelname)s %(name)s [%(bot_id)s/%(chat_id)s]: %(message)s",
         level=logging.INFO,
-        defaults={"bot_id": "-", "chat_id": "-"},
     )
     parser = argparse.ArgumentParser(description="bebro-bots")
     parser.add_argument(

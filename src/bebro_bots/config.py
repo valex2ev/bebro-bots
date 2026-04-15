@@ -264,7 +264,8 @@ def min_created_at_cutoff(retention_days: float | None) -> float | None:
 
 
 def load_app_config() -> AppConfig:
-    load_dotenv()
+    _project_root = Path(__file__).resolve().parents[2]
+    load_dotenv(dotenv_path=_project_root / ".env", override=True)
     path = _resolve_config_path()
     raw: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     cfg = AppConfig.model_validate(raw)
