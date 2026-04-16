@@ -36,6 +36,10 @@ class BotPersonaConfig(BaseModel):
     username: str
     mood_default: str = "нейтральное"
     sticker_set_names: list[str] = Field(default_factory=list)
+    provider: Literal["openai", "anthropic"] = Field(
+        default="openai",
+        description="Активный LLM-провайдер для этого бота: openai или anthropic.",
+    )
 
 
 class LimitsConfig(BaseModel):
@@ -161,10 +165,6 @@ class VpnWatchConfig(BaseModel):
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    provider: Literal["openai", "anthropic"] = Field(
-        default="openai",
-        description="Активный LLM-провайдер: openai или anthropic.",
-    )
     openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
     anthropic: AnthropicConfig = Field(default_factory=AnthropicConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
@@ -299,23 +299,23 @@ def create_anthropic_client(cfg: AppConfig):
     return AsyncAnthropic(api_key=env_token(cfg.anthropic.api_key_env))
 
 
-def create_llm_client(cfg: AppConfig):
-    """Создать клиент активного провайдера (AsyncOpenAI или AsyncAnthropic)."""
-    if cfg.provider == "anthropic":
+def create_llm_client(cfg: AppConfig, persona: BotPersonaConfig):
+    """Создать клиент провайдера, заданного в настройках бота (AsyncOpenAI или AsyncAnthropic)."""
+    if persona.provider == "anthropic":
         return create_anthropic_client(cfg)
     return create_openai_client(cfg)
 
 
-def active_model(cfg: AppConfig) -> str:
-    """Модель активного провайдера."""
-    if cfg.provider == "anthropic":
+def active_model(cfg: AppConfig, persona: BotPersonaConfig) -> str:
+    """Модель провайдера, заданного в настройках бота."""
+    if persona.provider == "anthropic":
         return cfg.anthropic.model
     return cfg.openai.model
 
 
-def active_daily_input_tokens(cfg: AppConfig) -> int:
-    """Суточный лимит input-токенов активного провайдера."""
-    if cfg.provider == "anthropic":
+def active_daily_input_tokens(cfg: AppConfig, persona: BotPersonaConfig) -> int:
+    """Суточный лимит input-токенов провайдера, заданного в настройках бота."""
+    if persona.provider == "anthropic":
         return cfg.anthropic.daily_input_tokens
     return cfg.openai.daily_input_tokens
 

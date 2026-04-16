@@ -1,9 +1,5 @@
 # Скопируйте в config.yaml и поправьте. Токены — только через .env (см. token_env).
 
-# Активный LLM-провайдер: openai или anthropic.
-# Переключение без перезапуска конфигурации — достаточно изменить это поле.
-provider: openai
-
 openai:
   api_key_env: OPENAI_API_KEY
   model: gpt-4o-mini
@@ -94,8 +90,11 @@ bots:
     token_env: BEBRO_BIBA_BOT_TOKEN
     username: bebro_biba_bot
     mood_default: "спокойное любопытство"
+    # Активный LLM-провайдер для этого бота: openai или anthropic.
+    provider: openai
 
   - id: boba
     token_env: BEBRO_BOBA_BOT_TOKEN
     username: bebro_boba_bot
     mood_default: "лёгкая ирония"
+    provider: anthropic

@@ -58,9 +58,9 @@ def _get_chat_lock(chat_id: int) -> threading.Lock:
         return _chat_locks[chat_id]
 
 
-def _llm_module(cfg: AppConfig):
-    """Возвращает модуль с run_agent_turn и maybe_summarize для активного провайдера."""
-    return _anthropic_llm if cfg.provider == "anthropic" else _openai_llm
+def _llm_module(cfg: AppConfig, persona: BotPersonaConfig):
+    """Возвращает модуль с run_agent_turn и maybe_summarize для провайдера бота."""
+    return _anthropic_llm if persona.provider == "anthropic" else _openai_llm
 
 
 def _allowed_chat(cfg: AppConfig, chat_id: int) -> bool:
@@ -187,14 +187,14 @@ def _format_params_message(
         min_created_at=min_created_at_cutoff(sr.retention_days),
     )
     day = usage_day_utc_string()
-    used_tok, used_ws = db.get_global_usage(day, provider=app_cfg.provider)
+    used_tok, used_ws = db.get_global_usage(day, provider=persona.provider)
     lim = app_cfg.limits
     lines: list[str] = [
         f"Бот «{bot_id}», чат {chat_id}",
-        f"Провайдер: {app_cfg.provider} / Модель: {active_model(app_cfg)}",
+        f"Провайдер: {persona.provider} / Модель: {active_model(app_cfg, persona)}",
         f"Web search (режим): {app_cfg.web_search.mode}",
         f"Сутки учёта лимитов (UTC): {day}",
-        f"Input-токены (потрачено / лимит): {used_tok} / {active_daily_input_tokens(app_cfg)}",
+        f"Input-токены (потрачено / лимит): {used_tok} / {active_daily_input_tokens(app_cfg, persona)}",
         f"Web search за сутки (потрачено / лимит): {used_ws} / {lim.daily_web_searches}",
         f"Восприимчивость к пожеланиям (конфиг): {app_cfg.feedback_sensitivity} из 5",
         f"Вероятность ответа без @ (конфиг): {app_cfg.reply_probability}",
@@ -477,7 +477,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         rows_for_vision = _merge_message_rows_by_message_id(rows_base, tail_rows)
 
         day = usage_day_utc_string()
-        if not db.input_tokens_below_daily_limit(day, active_daily_input_tokens(app_cfg), provider=app_cfg.provider):
+        if not db.input_tokens_below_daily_limit(day, active_daily_input_tokens(app_cfg, persona), provider=persona.provider):
             await _maybe_notify_limit(
                 application=context.application,
                 chat_id=chat_id,
@@ -562,7 +562,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 "они соответствуют пометкам [фото] в контексте выше."
             )
 
-        llm = _llm_module(app_cfg)
+        llm = _llm_module(app_cfg, persona)
         try:
             turn = await llm.run_agent_turn(
                 client=client,
@@ -807,7 +807,7 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     day = usage_day_utc_string()
-    if not db.input_tokens_below_daily_limit(day, active_daily_input_tokens(app_cfg), provider=app_cfg.provider):
+    if not db.input_tokens_below_daily_limit(day, active_daily_input_tokens(app_cfg, persona), provider=persona.provider):
         return
 
     mood = db.get_mood(persona.id) or persona.mood_default
@@ -847,7 +847,7 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         user_lines.append(
             "К запросу приложены изображения в хронологическом порядке; они соответствуют пометкам [фото] в контексте выше."
         )
-    llm = _llm_module(app_cfg)
+    llm = _llm_module(app_cfg, persona)
     try:
         turn = await llm.run_agent_turn(
             client=client,
@@ -905,7 +905,7 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     day = usage_day_utc_string()
-    if not db.input_tokens_below_daily_limit(day, active_daily_input_tokens(app_cfg), provider=app_cfg.provider):
+    if not db.input_tokens_below_daily_limit(day, active_daily_input_tokens(app_cfg, persona), provider=persona.provider):
         return
 
     settings = db.get_settings(persona.id, chat_id)
@@ -971,7 +971,7 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         user_lines.append(
             "К указанному сообщению приложено изображение — учти содержимое при выборе emoji."
         )
-    llm = _llm_module(app_cfg)
+    llm = _llm_module(app_cfg, persona)
     try:
         turn = await llm.run_agent_turn(
             client=client,

@@ -20,10 +20,10 @@ _apps: dict[str, Any] = {}
 async def _lifespan(app: FastAPI):
     cfg = load_app_config()
     db = Database(cfg.sqlite_path)
-    client = create_llm_client(cfg)
     if not cfg.bots:
         raise RuntimeError("Нет ботов в конфиге")
     for persona in cfg.bots:
+        client = create_llm_client(cfg, persona)
         tg = build_application(persona=persona, app_cfg=cfg, db=db, client=client)
         await tg.initialize()
         await tg.start()

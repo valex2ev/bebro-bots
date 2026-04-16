@@ -106,7 +106,7 @@ def build_application(
     application.bot_data["persona"] = persona
     application.bot_data["db"] = db
     application.bot_data["llm_client"] = client
-    application.bot_data["model"] = active_model(app_cfg)
+    application.bot_data["model"] = active_model(app_cfg, persona)
     application.bot_data["feedback_sensitivity"] = app_cfg.feedback_sensitivity
     application.bot_data["rng"] = random.Random()
 

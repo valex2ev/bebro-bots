@@ -15,12 +15,12 @@ from bebro_bots.db import Database
 def _run_polling() -> None:
     cfg = load_app_config()
     db = Database(cfg.sqlite_path)
-    client = create_llm_client(cfg)
     if not cfg.bots:
         raise SystemExit("В config.yaml нет ботов (ключ bots).")
 
     threads: list[threading.Thread] = []
     for persona in cfg.bots:
+        client = create_llm_client(cfg, persona)
         app = build_application(persona=persona, app_cfg=cfg, db=db, client=client)
 
         def runner(application=app) -> None:

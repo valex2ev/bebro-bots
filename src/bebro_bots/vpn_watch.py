@@ -117,7 +117,7 @@ async def vpn_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         {"failure_detected_at": None, "failure_notified": False},
     )
 
-    ok = await probe_connectivity(bot, client, provider=cfg.provider)
+    ok = await probe_connectivity(bot, client, provider=persona.provider)
     if ok:
         state["failure_detected_at"] = None
         state["failure_notified"] = False
@@ -146,7 +146,7 @@ async def vpn_watch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         await asyncio.sleep(vw.post_restart_wait_seconds)
 
-        if await probe_connectivity(bot, client, provider=cfg.provider):
+        if await probe_connectivity(bot, client, provider=persona.provider):
             recovery_ts = time.time()
             text = (
                 "VPN: соединение восстановлено.\n"
