@@ -63,6 +63,14 @@ def _llm_module(cfg: AppConfig, persona: BotPersonaConfig):
     return _anthropic_llm if persona.provider == "anthropic" else _openai_llm
 
 
+def _effective_daily_limit(app_cfg: AppConfig, persona: BotPersonaConfig, db: Database, day: str) -> int:
+    """Возвращает актуальный лимит токенов на день: оверрайд из БД или значение из конфига."""
+    override = db.get_daily_input_limit_override(day, persona.provider)
+    if override is not None:
+        return override
+    return active_daily_input_tokens(app_cfg, persona)
+
+
 def _allowed_chat(cfg: AppConfig, chat_id: int) -> bool:
     if not cfg.allowed_chat_ids:
         return True
@@ -189,12 +197,15 @@ def _format_params_message(
     day = usage_day_utc_string()
     used_tok, used_ws = db.get_global_usage(day, provider=persona.provider)
     lim = app_cfg.limits
+    eff_limit = _effective_daily_limit(app_cfg, persona, db, day)
+    cfg_limit = active_daily_input_tokens(app_cfg, persona)
+    limit_str = str(eff_limit) if eff_limit == cfg_limit else f"{eff_limit} (конфиг: {cfg_limit})"
     lines: list[str] = [
         f"Бот «{bot_id}», чат {chat_id}",
         f"Провайдер: {persona.provider} / Модель: {active_model(app_cfg, persona)}",
         f"Web search (режим): {app_cfg.web_search.mode}",
         f"Сутки учёта лимитов (UTC): {day}",
-        f"Input-токены (потрачено / лимит): {used_tok} / {active_daily_input_tokens(app_cfg, persona)}",
+        f"Input-токены (потрачено / лимит): {used_tok} / {limit_str}",
         f"Web search за сутки (потрачено / лимит): {used_ws} / {lim.daily_web_searches}",
         f"Восприимчивость к пожеланиям (конфиг): {app_cfg.feedback_sensitivity} из 5",
         f"Вероятность ответа без @ (конфиг): {app_cfg.reply_probability}",
@@ -477,7 +488,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         rows_for_vision = _merge_message_rows_by_message_id(rows_base, tail_rows)
 
         day = usage_day_utc_string()
-        if not db.input_tokens_below_daily_limit(day, active_daily_input_tokens(app_cfg, persona), provider=persona.provider):
+        if not db.input_tokens_below_daily_limit(day, _effective_daily_limit(app_cfg, persona, db, day), provider=persona.provider):
             await _maybe_notify_limit(
                 application=context.application,
                 chat_id=chat_id,
@@ -580,6 +591,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 vision_images=vision_images if vision_images else None,
                 app_cfg=app_cfg,
                 web_search_mode=ws_mode,
+                effective_daily_limit=_effective_daily_limit(app_cfg, persona, db, day),
             )
             if turn.blocked_by_input_token_limit:
                 await _maybe_notify_limit(
@@ -614,6 +626,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     chat_id=chat_id,
                     recent_lines=lines,
                     app_cfg=app_cfg,
+                    effective_daily_limit=_effective_daily_limit(app_cfg, persona, db, usage_day_utc_string()),
                 )
         except Exception:
             _ctx_logger(persona.id, chat_id).exception("summarize failed")
@@ -779,6 +792,53 @@ async def on_admin_status(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
 
+async def on_admin_set_daily_limit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/bebroadmin_set_daily_limit <provider> <limit> — установить лимит токенов на текущие сутки."""
+    message = update.effective_message
+    user = update.effective_user
+    app_cfg: AppConfig = context.application.bot_data["app_cfg"]
+    persona: BotPersonaConfig = context.application.bot_data["persona"]
+    db: Database = context.application.bot_data["db"]
+    if not message or not user:
+        return
+    if not command_is_for_this_bot_username(message, persona.username):
+        return
+    chat_id = message.chat_id
+    if not _allowed_chat(app_cfg, chat_id):
+        await message.reply_text("Access denied")
+        return
+    if not _is_admin(app_cfg, user.id, user.username):
+        await message.reply_text("Команда только для администраторов из конфигурации.")
+        return
+
+    args = (context.args or [])
+    if len(args) != 2:
+        await message.reply_text(
+            "Использование: /bebroadmin_set_daily_limit <provider> <limit>\n"
+            "Пример: /bebroadmin_set_daily_limit openai 1000000"
+        )
+        return
+
+    provider_arg = args[0].strip().lower()
+    if provider_arg not in ("openai", "anthropic"):
+        await message.reply_text("Провайдер должен быть openai или anthropic.")
+        return
+    try:
+        limit_arg = int(args[1].strip())
+        if limit_arg < 0:
+            raise ValueError
+    except ValueError:
+        await message.reply_text("Лимит должен быть целым неотрицательным числом.")
+        return
+
+    day = usage_day_utc_string()
+    db.set_daily_input_limit_override(day, provider_arg, limit_arg)
+    await message.reply_text(
+        f"Провайдер: {provider_arg}\n"
+        f"Лимит на сегодня ({day} UTC): {limit_arg:,}".replace(",", " ")
+    )
+
+
 async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Редкая инициатива в случайном чате с историей."""
     app: Application = context.application
@@ -863,6 +923,7 @@ async def initiative_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             feedback_sensitivity=sens,
             vision_images=vision_images if vision_images else None,
             app_cfg=app_cfg,
+            effective_daily_limit=_effective_daily_limit(app_cfg, persona, db, usage_day_utc_string()),
         )
         if turn.blocked_by_input_token_limit:
             return
@@ -987,6 +1048,7 @@ async def proactive_reaction_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             feedback_sensitivity=sens,
             vision_images=vision_images if vision_images else None,
             app_cfg=app_cfg,
+            effective_daily_limit=_effective_daily_limit(app_cfg, persona, db, usage_day_utc_string()),
         )
         if turn.blocked_by_input_token_limit:
             return

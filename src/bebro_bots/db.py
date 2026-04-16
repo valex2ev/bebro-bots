@@ -168,6 +168,13 @@ class Database:
                   last_notified REAL NOT NULL,
                   PRIMARY KEY (chat_id, limit_kind)
                 );
+
+                CREATE TABLE IF NOT EXISTS daily_limit_overrides (
+                  usage_day TEXT NOT NULL,
+                  provider TEXT NOT NULL,
+                  limit_tokens INTEGER NOT NULL,
+                  PRIMARY KEY (usage_day, provider)
+                );
                 """
             )
             self._migrate(conn)
@@ -898,6 +905,30 @@ class Database:
                 """,
                 (usage_day, provider, n),
             )
+
+    def set_daily_input_limit_override(self, usage_day: str, provider: str, limit_tokens: int) -> None:
+        """Установить оверрайд суточного лимита токенов на конкретный день и провайдер."""
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO daily_limit_overrides (usage_day, provider, limit_tokens)
+                VALUES (?, ?, ?)
+                ON CONFLICT(usage_day, provider) DO UPDATE SET
+                  limit_tokens = excluded.limit_tokens
+                """,
+                (usage_day, provider, limit_tokens),
+            )
+
+    def get_daily_input_limit_override(self, usage_day: str, provider: str) -> int | None:
+        """Вернуть оверрайд лимита токенов на день/провайдер или None, если оверрайда нет."""
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT limit_tokens FROM daily_limit_overrides WHERE usage_day=? AND provider=?",
+                (usage_day, provider),
+            ).fetchone()
+        if row is None:
+            return None
+        return int(row["limit_tokens"])
 
     def web_search_below_daily_limit(self, usage_day: str, daily_limit: int, provider: str = "openai") -> bool:
         if daily_limit <= 0:

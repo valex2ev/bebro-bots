@@ -154,10 +154,12 @@ async def run_agent_turn(
     web_search_mode: Literal["on_trigger", "always"] = "on_trigger",
     record_usage: bool = True,
     usage_day: str | None = None,
+    effective_daily_limit: int | None = None,
 ) -> AgentTurnResult:
     day = usage_day or usage_day_utc_string()
     if app_cfg and record_usage:
-        if not db.input_tokens_below_daily_limit(day, app_cfg.openai.daily_input_tokens, provider="openai"):
+        limit = effective_daily_limit if effective_daily_limit is not None else app_cfg.openai.daily_input_tokens
+        if not db.input_tokens_below_daily_limit(day, limit, provider="openai"):
             return AgentTurnResult(
                 CompleteTurnResult(action="none", text=None, reaction_emoji=None, sticker_file_id=None),
                 blocked_by_input_token_limit=True,
@@ -363,10 +365,12 @@ async def maybe_summarize(
     chat_id: int,
     recent_lines: list[str],
     app_cfg: AppConfig | None = None,
+    effective_daily_limit: int | None = None,
 ) -> None:
     """Периодическое обновление саммари по последним репликам."""
     day = usage_day_utc_string()
-    if app_cfg and not db.input_tokens_below_daily_limit(day, app_cfg.openai.daily_input_tokens, provider="openai"):
+    limit = effective_daily_limit if effective_daily_limit is not None else (app_cfg.openai.daily_input_tokens if app_cfg else 0)
+    if app_cfg and not db.input_tokens_below_daily_limit(day, limit, provider="openai"):
         return
     prompt = (
         "Сожми следующий фрагмент переписки в краткое саммари на русском (5–10 предложений максимум), "
