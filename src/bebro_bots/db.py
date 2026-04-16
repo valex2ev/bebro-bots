@@ -930,6 +930,19 @@ class Database:
             return None
         return int(row["limit_tokens"])
 
+    def reset_daily_input_tokens(self, usage_day: str, provider: str) -> None:
+        """Обнулить счётчик потраченных input-токенов за указанный день и провайдер."""
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO global_usage_daily (usage_day, provider, input_tokens, web_searches)
+                VALUES (?, ?, 0, 0)
+                ON CONFLICT(usage_day, provider) DO UPDATE SET
+                  input_tokens = 0
+                """,
+                (usage_day, provider),
+            )
+
     def web_search_below_daily_limit(self, usage_day: str, daily_limit: int, provider: str = "openai") -> bool:
         if daily_limit <= 0:
             return True

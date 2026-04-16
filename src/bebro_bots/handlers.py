@@ -823,6 +823,8 @@ async def on_admin_set_daily_limit(update: Update, context: ContextTypes.DEFAULT
     if provider_arg not in ("openai", "anthropic"):
         await message.reply_text("Провайдер должен быть openai или anthropic.")
         return
+    if persona.provider != provider_arg:
+        return
     try:
         limit_arg = int(args[1].strip())
         if limit_arg < 0:
@@ -833,6 +835,7 @@ async def on_admin_set_daily_limit(update: Update, context: ContextTypes.DEFAULT
 
     day = usage_day_utc_string()
     db.set_daily_input_limit_override(day, provider_arg, limit_arg)
+    db.reset_daily_input_tokens(day, provider_arg)
     await message.reply_text(
         f"Провайдер: {provider_arg}\n"
         f"Лимит на сегодня ({day} UTC): {limit_arg:,}".replace(",", " ")
