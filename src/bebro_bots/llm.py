@@ -148,6 +148,7 @@ async def run_agent_turn(
     allow_web_search: bool = False,
     allow_mutations: bool = True,
     allow_chat_alias_tools: bool = True,
+    explicitly_addressed: bool = True,
     feedback_sensitivity: int = 4,
     vision_images: list[tuple[bytes, str]] | None = None,
     app_cfg: AppConfig | None = None,
@@ -179,6 +180,26 @@ async def run_agent_turn(
                 ),
             }
         )
+    if not explicitly_addressed:
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "Системное напоминание: ты включился в этот разговор самостоятельно (явного @username или алиаса не было). "
+                    "Сохраняй правила и инструкции только если они явно адресованы тебе или всем ботам сразу, "
+                    "но не конкретному другому боту."
+                ),
+            }
+        )
+
+    async def _consolidate() -> None:
+        try:
+            await consolidate_rules(
+                client=client, model=model, db=db, bot_id=bot_id, chat_id=chat_id,
+                app_cfg=app_cfg, usage_day=day, effective_daily_limit=effective_daily_limit,
+            )
+        except Exception:
+            logger.exception("consolidate_rules failed bot=%s chat=%s", bot_id, chat_id)
 
     tools = _tools_schema(
         include_web_search=allow_web_search,
@@ -242,6 +263,7 @@ async def run_agent_turn(
                         feedback_sensitivity=feedback_sensitivity,
                         app_cfg=app_cfg,
                         usage_day=day,
+                        consolidate_callback=_consolidate,
                     )
                 messages.append(
                     {
@@ -391,3 +413,104 @@ async def maybe_summarize(
     text = (resp.choices[0].message.content or "").strip()
     if text:
         db.set_summary(bot_id, chat_id, text)
+
+
+async def consolidate_rules(
+    *,
+    client: AsyncOpenAI,
+    model: str,
+    db: Database,
+    bot_id: str,
+    chat_id: int,
+    app_cfg: AppConfig | None = None,
+    usage_day: str | None = None,
+    effective_daily_limit: int | None = None,
+) -> None:
+    """Консолидировать situation_rules и long_memory через LLM: убрать дубли, объединить похожие."""
+    day = usage_day or usage_day_utc_string()
+    if app_cfg:
+        limit = effective_daily_limit if effective_daily_limit is not None else app_cfg.openai.daily_input_tokens
+        if not db.input_tokens_below_daily_limit(day, limit, provider="openai"):
+            return
+
+    rules = db.list_situation_rules_with_ids(bot_id, chat_id, limit=200, min_created_at=None)
+    if len(rules) > 1:
+        rules_text = "\n".join(
+            f"{i + 1}. trigger: {t}\n   instruction: {ins}"
+            for i, (_, t, ins) in enumerate(rules)
+        )
+        prompt = (
+            "Это список ситуационных правил Telegram-бота (trigger → instruction). "
+            "Убери точные дубли, объедини правила с одинаковым или перекрывающимся смыслом в одно, "
+            "разреши противоречия (предпочти более конкретное или новое), "
+            "сократи формулировки без потери смысла.\n\n"
+            f"{rules_text}\n\n"
+            'Верни ТОЛЬКО JSON-массив: [{"trigger": "...", "instruction": "..."}]. Без пояснений.'
+        )
+        try:
+            resp = await _llm_call_with_retry(
+                lambda: client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.2,
+                )
+            )
+            if app_cfg:
+                u = getattr(resp, "usage", None)
+                pt = getattr(u, "prompt_tokens", None) if u else None
+                if pt:
+                    db.add_input_tokens(day, int(pt), provider="openai")
+            raw = (resp.choices[0].message.content or "").strip()
+            m = re.search(r"\[.*\]", raw, re.DOTALL)
+            if m:
+                consolidated = json.loads(m.group())
+                new_rules = [
+                    (r["trigger"], r["instruction"])
+                    for r in consolidated
+                    if isinstance(r, dict) and r.get("trigger") and r.get("instruction")
+                ]
+                if new_rules:
+                    db.replace_situation_rules(bot_id, chat_id, new_rules)
+                    logger.info(
+                        "consolidate situation_rules bot=%s chat=%s: %d → %d",
+                        bot_id, chat_id, len(rules), len(new_rules),
+                    )
+        except Exception:
+            logger.exception("consolidate situation_rules failed bot=%s chat=%s", bot_id, chat_id)
+
+    memory = db.list_long_memory_with_ids(bot_id, chat_id, limit=200, min_created_at=None)
+    if len(memory) > 1:
+        mem_text = "\n".join(f"{i + 1}. {content}" for i, (_, content) in enumerate(memory))
+        prompt = (
+            "Это список долговременных инструкций Telegram-бота. "
+            "Убери точные дубли, объедини похожие инструкции, разреши противоречия, "
+            "сократи без потери смысла.\n\n"
+            f"{mem_text}\n\n"
+            'Верни ТОЛЬКО JSON-массив строк: ["...", "..."]. Без пояснений.'
+        )
+        try:
+            resp = await _llm_call_with_retry(
+                lambda: client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.2,
+                )
+            )
+            if app_cfg:
+                u = getattr(resp, "usage", None)
+                pt = getattr(u, "prompt_tokens", None) if u else None
+                if pt:
+                    db.add_input_tokens(day, int(pt), provider="openai")
+            raw = (resp.choices[0].message.content or "").strip()
+            m = re.search(r"\[.*\]", raw, re.DOTALL)
+            if m:
+                consolidated = json.loads(m.group())
+                new_entries = [e for e in consolidated if isinstance(e, str) and e.strip()]
+                if new_entries:
+                    db.replace_long_memory(bot_id, chat_id, new_entries)
+                    logger.info(
+                        "consolidate long_memory bot=%s chat=%s: %d → %d",
+                        bot_id, chat_id, len(memory), len(new_entries),
+                    )
+        except Exception:
+            logger.exception("consolidate long_memory failed bot=%s chat=%s", bot_id, chat_id)

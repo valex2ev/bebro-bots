@@ -519,6 +519,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
         allow_mutations = _allow_learning(message)
+        was_explicitly_addressed = bool(addressed)
         allow_chat_alias_tools = chat_alias_mutations_allowed_for_message(
             msg_text,
             my_username=persona.username,
@@ -587,6 +588,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 allow_web_search=allow_web_search,
                 allow_mutations=allow_mutations,
                 allow_chat_alias_tools=allow_chat_alias_tools,
+                explicitly_addressed=was_explicitly_addressed,
                 feedback_sensitivity=sens,
                 vision_images=vision_images if vision_images else None,
                 app_cfg=app_cfg,

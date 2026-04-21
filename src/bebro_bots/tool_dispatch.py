@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from collections.abc import Callable, Coroutine
 from typing import Any, TYPE_CHECKING
 
 from bebro_bots.chat_aliases_policy import reject_reason_for_chat_alias
@@ -82,6 +84,7 @@ async def _dispatch_tool(
     feedback_sensitivity: int = 4,
     app_cfg: AppConfig | None = None,
     usage_day: str | None = None,
+    consolidate_callback: Callable[[], Coroutine[Any, Any, None]] | None = None,
 ) -> str:
     try:
         if name in MUTATING_TOOL_NAMES and not allow_mutations:
@@ -179,6 +182,8 @@ async def _dispatch_tool(
                 str(args["text"]),
                 retention_days=lm_pol.retention_days,
             )
+            if consolidate_callback:
+                asyncio.create_task(consolidate_callback())
             return json.dumps({"ok": True}, ensure_ascii=False)
         if name == "remove_long_instruction":
             ok = db.delete_long_memory_by_id(bot_id, chat_id, int(args.get("memory_id", 0)))
@@ -199,6 +204,8 @@ async def _dispatch_tool(
                 max_rows=sr_pol.max_stored,
                 retention_days=sr_pol.retention_days,
             )
+            if consolidate_callback:
+                asyncio.create_task(consolidate_callback())
             return json.dumps({"ok": True}, ensure_ascii=False)
         if name == "remove_situation_rule":
             ok = db.delete_situation_rule_by_id(bot_id, chat_id, int(args.get("rule_id", 0)))

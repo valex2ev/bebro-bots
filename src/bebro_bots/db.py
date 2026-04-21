@@ -853,6 +853,53 @@ class Database:
                     (bot_id, chat_id, excess),
                 )
 
+    def replace_situation_rules(
+        self,
+        bot_id: str,
+        chat_id: int,
+        rules: list[tuple[str, str]],
+    ) -> None:
+        """Атомарно заменить все situation_rules для (bot_id, chat_id) на новый список."""
+        now = time.time()
+        with self.connect() as conn:
+            conn.execute(
+                "DELETE FROM situation_rules WHERE bot_id=? AND chat_id=?",
+                (bot_id, chat_id),
+            )
+            for trig, ins in rules:
+                trig = trig.strip()
+                ins = ins.strip()
+                if trig and ins:
+                    conn.execute(
+                        """
+                        INSERT INTO situation_rules
+                        (bot_id, chat_id, trigger_text, instruction_text, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (bot_id, chat_id, trig, ins, now, now),
+                    )
+
+    def replace_long_memory(
+        self,
+        bot_id: str,
+        chat_id: int,
+        entries: list[str],
+    ) -> None:
+        """Атомарно заменить все long_memory для (bot_id, chat_id) на новый список."""
+        now = time.time()
+        with self.connect() as conn:
+            conn.execute(
+                "DELETE FROM long_memory WHERE bot_id=? AND chat_id=?",
+                (bot_id, chat_id),
+            )
+            for content in entries:
+                content = content.strip()
+                if content:
+                    conn.execute(
+                        "INSERT INTO long_memory (bot_id, chat_id, content, created_at) VALUES (?, ?, ?, ?)",
+                        (bot_id, chat_id, content, now),
+                    )
+
     def clear_chat_memory(self, bot_id: str, chat_id: int) -> None:
         with self.connect() as conn:
             conn.execute(
