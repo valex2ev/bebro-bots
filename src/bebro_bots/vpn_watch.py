@@ -21,17 +21,32 @@ RESTART_TIMEOUT = 120
 
 
 async def _probe_llm_api(client: Any, provider: str) -> bool:
-    """Проверка доступности LLM API в зависимости от провайдера."""
+    """Проверка доступности LLM API в зависимости от провайдера.
+
+    Возвращает False только при сетевых ошибках (нет связи).
+    Ошибки аутентификации и прочие API-ошибки трактуются как «сервер доступен».
+    """
+    import httpx
+
     try:
         if provider == "anthropic":
-            # Минимальный запрос к Anthropic — список моделей
             await asyncio.wait_for(client.models.list(), timeout=PROBE_TIMEOUT)
         else:
             await asyncio.wait_for(client.models.list(), timeout=PROBE_TIMEOUT)
         return True
-    except Exception:
-        logger.warning("VPN watch: проверка %s API не удалась", provider, exc_info=True)
+    except asyncio.TimeoutError:
+        logger.warning("VPN watch: таймаут проверки %s API", provider)
         return False
+    except httpx.ConnectError:
+        logger.warning("VPN watch: нет соединения с %s API", provider)
+        return False
+    except httpx.TimeoutException:
+        logger.warning("VPN watch: таймаут httpx при проверке %s API", provider)
+        return False
+    except Exception:
+        # API-ошибки (401, 429, 5xx) означают, что сервер доступен — VPN работает
+        logger.debug("VPN watch: %s API вернул ошибку приложения (VPN OK)", provider, exc_info=True)
+        return True
 
 
 async def probe_connectivity(bot: Any, client: Any, provider: str = "openai") -> bool:
