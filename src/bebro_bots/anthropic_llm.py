@@ -29,6 +29,17 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MAX_OUTPUT_TOKENS = 2048
 
 
+def _count_input_tokens(usage: Any) -> int:
+    """Суммирует все входные токены из usage: обычные + создание кэша + чтение кэша."""
+    if usage is None:
+        return 0
+    return (
+        (getattr(usage, "input_tokens", None) or 0)
+        + (getattr(usage, "cache_creation_input_tokens", None) or 0)
+        + (getattr(usage, "cache_read_input_tokens", None) or 0)
+    )
+
+
 def _openai_tools_to_anthropic(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Конвертирует список инструментов из формата OpenAI в формат Anthropic.
 
@@ -141,6 +152,15 @@ async def run_agent_turn(
     )
     tools = _openai_tools_to_anthropic(openai_tools)
 
+    # Кэшируем список инструментов: добавляем cache_control к последнему инструменту.
+    if tools:
+        tools[-1] = {**tools[-1], "cache_control": {"type": "ephemeral"}}
+
+    # Кэшируем system prompt: передаём как список блоков с cache_control.
+    system_blocks: list[dict[str, Any]] = [
+        {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}
+    ]
+
     max_output_tokens = (
         app_cfg.anthropic.max_output_tokens if app_cfg else _DEFAULT_MAX_OUTPUT_TOKENS
     )
@@ -149,7 +169,7 @@ async def run_agent_turn(
             lambda: client.messages.create(
                 model=model,
                 max_tokens=max_output_tokens,
-                system=system_prompt,
+                system=system_blocks,
                 messages=messages,
                 tools=tools,
                 tool_choice={"type": "auto"},
@@ -157,9 +177,9 @@ async def run_agent_turn(
             )
         )
         if app_cfg and record_usage:
-            pt = getattr(getattr(resp, "usage", None), "input_tokens", None)
-            if pt is not None:
-                db.add_input_tokens(day, int(pt), provider="anthropic")
+            pt = _count_input_tokens(getattr(resp, "usage", None))
+            if pt:
+                db.add_input_tokens(day, pt, provider="anthropic")
 
         # resp.content — список блоков: TextBlock | ToolUseBlock
         tool_use_blocks = [b for b in resp.content if b.type == "tool_use"]
@@ -277,9 +297,9 @@ async def maybe_summarize(
         )
     )
     if app_cfg:
-        pt = getattr(getattr(resp, "usage", None), "input_tokens", None)
-        if pt is not None:
-            db.add_input_tokens(day, int(pt), provider="anthropic")
+        pt = _count_input_tokens(getattr(resp, "usage", None))
+        if pt:
+            db.add_input_tokens(day, pt, provider="anthropic")
     text_blocks = [b for b in resp.content if b.type == "text"]
     text = " ".join(b.text for b in text_blocks if b.text).strip()
     if text:
@@ -330,9 +350,9 @@ async def consolidate_rules(
                 )
             )
             if app_cfg:
-                pt = getattr(getattr(resp, "usage", None), "input_tokens", None)
+                pt = _count_input_tokens(getattr(resp, "usage", None))
                 if pt:
-                    db.add_input_tokens(day, int(pt), provider="anthropic")
+                    db.add_input_tokens(day, pt, provider="anthropic")
             text_blocks = [b for b in resp.content if b.type == "text"]
             raw = " ".join(b.text for b in text_blocks if b.text).strip()
             m = re.search(r"\[.*\]", raw, re.DOTALL)
@@ -372,9 +392,9 @@ async def consolidate_rules(
                 )
             )
             if app_cfg:
-                pt = getattr(getattr(resp, "usage", None), "input_tokens", None)
+                pt = _count_input_tokens(getattr(resp, "usage", None))
                 if pt:
-                    db.add_input_tokens(day, int(pt), provider="anthropic")
+                    db.add_input_tokens(day, pt, provider="anthropic")
             text_blocks = [b for b in resp.content if b.type == "text"]
             raw = " ".join(b.text for b in text_blocks if b.text).strip()
             m = re.search(r"\[.*\]", raw, re.DOTALL)
