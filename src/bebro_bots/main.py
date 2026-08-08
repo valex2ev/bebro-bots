@@ -12,6 +12,21 @@ from bebro_bots.config import create_llm_client, load_app_config
 from bebro_bots.db import Database
 
 
+class _ContextDefaults(logging.Filter):
+    """Добавляет bot_id/chat_id='-' записям от логгеров без LoggerAdapter.
+
+    Filter срабатывает после makeRecord, поэтому не конфликтует с extra
+    из LoggerAdapter (в отличие от setLogRecordFactory в Python 3.12+).
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not hasattr(record, "bot_id"):
+            record.bot_id = "-"
+        if not hasattr(record, "chat_id"):
+            record.chat_id = "-"
+        return True
+
+
 def _run_polling() -> None:
     cfg = load_app_config()
     db = Database(cfg.sqlite_path)
@@ -36,23 +51,6 @@ def _run_polling() -> None:
 
 
 def main() -> None:
-    # Добавляем поля bot_id/chat_id по умолчанию во все записи логов
-    # (LoggerAdapter в handlers.py переопределяет их для конкретных событий)
-    _orig_factory = logging.getLogRecordFactory()
-
-    def _record_factory(*args, **kwargs):
-        record = _orig_factory(*args, **kwargs)
-        if not hasattr(record, "bot_id"):
-            record.bot_id = "-"
-        if not hasattr(record, "chat_id"):
-            record.chat_id = "-"
-        return record
-
-    logging.setLogRecordFactory(_record_factory)
-    logging.basicConfig(
-        format="%(asctime)s %(levelname)s %(name)s [%(bot_id)s/%(chat_id)s]: %(message)s",
-        level=logging.INFO,
-    )
     parser = argparse.ArgumentParser(description="bebro-bots")
     parser.add_argument(
         "mode",
@@ -61,7 +59,20 @@ def main() -> None:
         choices=("polling", "webhook"),
         help="polling (по умолчанию) или webhook",
     )
+    parser.add_argument(
+        "--log-file",
+        metavar="PATH",
+        default=None,
+        help="Путь к лог-файлу; если не задан — запись в файл отключена.",
+    )
     args = parser.parse_args()
+
+    fmt = "%(asctime)s %(levelname)s %(name)s [%(bot_id)s/%(chat_id)s]: %(message)s"
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if args.log_file:
+        handlers.append(logging.FileHandler(args.log_file, encoding="utf-8"))
+    logging.basicConfig(format=fmt, level=logging.INFO, handlers=handlers)
+    logging.getLogger().addFilter(_ContextDefaults())
 
     if args.mode == "polling":
         _run_polling()

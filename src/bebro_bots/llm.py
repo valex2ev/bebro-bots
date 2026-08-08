@@ -216,6 +216,7 @@ async def run_agent_turn(
                 tools=tools,
                 tool_choice="auto",
                 temperature=0.85,
+                reasoning_effort="none",
             )
         )
         if app_cfg and record_usage:

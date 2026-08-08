@@ -173,7 +173,6 @@ async def run_agent_turn(
                 messages=messages,
                 tools=tools,
                 tool_choice={"type": "auto"},
-                temperature=0.85,
             )
         )
         if app_cfg and record_usage:
@@ -293,7 +292,6 @@ async def maybe_summarize(
             model=model,
             max_tokens=512,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
         )
     )
     if app_cfg:
@@ -346,7 +344,6 @@ async def consolidate_rules(
                     model=model,
                     max_tokens=max_tokens,
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=0.2,
                 )
             )
             if app_cfg:
@@ -388,7 +385,6 @@ async def consolidate_rules(
                     model=model,
                     max_tokens=max_tokens,
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=0.2,
                 )
             )
             if app_cfg:
